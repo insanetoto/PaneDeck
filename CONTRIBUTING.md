@@ -7,7 +7,7 @@ PaneDeck 采用“一个 GitHub Issue、一个负责人、一个分支、一个 
 1. 在 GitHub 仓库的 `Settings → Collaborators` 中邀请同事；私有仓库必须先完成这一步。
 2. 将 `docs/tasks.md` 中准备开发的任务分别建立为 GitHub Issue，标题格式为 `[PD-XXX] 任务名称`。
 3. 把任务的依赖、目标、交付和验收原文复制到 Issue 正文。
-4. 建议为 `main` 设置分支保护：必须通过 Pull Request 合并、至少一人评审、禁止 force push、禁止删除分支。建立自动检查后，再要求检查通过才能合并。
+4. 如果当前 GitHub 套餐支持，建议为 `main` 设置分支保护：必须通过 Pull Request 合并、至少一人评审、禁止 force push、禁止删除分支。建立自动检查后，再要求检查通过才能合并。
 
 GitHub Issue 的 Assignee 是任务领取状态的唯一事实来源。`docs/tasks.md` 用于维护产品任务目录，不用于多人同时抢占任务。
 
