@@ -3,27 +3,51 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "packageManager": "npm@10.9.2",
+  "engines": {
+    "node": ">=22.12 <23",
+    "npm": ">=10 <11"
+  },
   "scripts": {
     "dev": "tauri dev",
     "dev:web": "vite",
     "build": "tauri build --no-bundle",
     "build:web": "tsc && vite build",
+    "check": "npm run check:boundaries && npm run check:frontend && npm run check:rust",
+    "check:boundaries": "node scripts/check-crate-boundaries.mjs",
+    "check:frontend": "npm run format:check && npm run lint && npm run typecheck && npm run test:web",
+    "check:rust": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked",
+    "format": "prettier --write . && cargo fmt --all",
+    "format:check": "prettier --check .",
+    "lint": "eslint .",
     "preview": "vite preview",
-    "test": "npm run test:web && cargo test --workspace --locked",
-    "test:web": "tsc && vite build",
+    "test": "npm run test:web && npm run test:rust",
+    "test:rust": "cargo test --workspace --locked",
+    "test:web": "vitest run",
+    "typecheck": "tsc --noEmit",
     "tauri": "tauri"
   },
   "dependencies": {
+    "@tauri-apps/api": "^2",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0",
-    "@tauri-apps/api": "^2"
+    "react-dom": "^19.1.0"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@tauri-apps/cli": "^2",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^6.0.2",
+    "eslint": "^10.11.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.12.0",
+    "jsdom": "^29.1.1",
+    "prettier": "^3.9.9",
     "typescript": "~6.0.3",
+    "typescript-eslint": "^8.70.1",
     "vite": "^8.0.16",
-    "@tauri-apps/cli": "^2"
+    "vitest": "^5.0.1"
   }
 }

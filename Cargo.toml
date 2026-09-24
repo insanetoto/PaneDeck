@@ -1,6 +1,11 @@
 [workspace]
-members = ["src-tauri"]
+members = ["crates/*", "src-tauri"]
 resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
 
 # macOS 27 rejects stripped proc-macro dylibs during release builds.
 # Build-time artifacts are not shipped, so keeping them unstripped has no runtime cost.

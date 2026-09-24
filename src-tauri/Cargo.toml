@@ -1,8 +1,9 @@
 [package]
 name = "panedeck"
-version = "0.1.0"
+version.workspace = true
 description = "A local dual-pane file manager for macOS"
-edition = "2021"
+edition.workspace = true
+license.workspace = true
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -17,4 +18,5 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+panedeck-app = { path = "../crates/panedeck-app" }
 tauri = { version = "2", features = [] }

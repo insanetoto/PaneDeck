@@ -1,0 +1,17 @@
+[package]
+name = "panedeck-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+panedeck-domain = { path = "../panedeck-domain" }
+panedeck-fs = { path = "../panedeck-fs" }
+panedeck-jobs = { path = "../panedeck-jobs" }
+panedeck-platform = { path = "../panedeck-platform" }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

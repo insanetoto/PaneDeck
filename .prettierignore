@@ -1,0 +1,9 @@
+Cargo.lock
+CONTRIBUTING.md
+dist
+docs/product-plan.md
+docs/tasks.md
+node_modules
+package-lock.json
+src-tauri/gen
+target

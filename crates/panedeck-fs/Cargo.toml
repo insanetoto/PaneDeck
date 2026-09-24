@@ -1,0 +1,19 @@
+[package]
+name = "panedeck-fs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+filetime = "0.2.29"
+fs2 = "0.4.3"
+notify = "8.2.0"
+panedeck-domain = { path = "../panedeck-domain" }
+tokio = { version = "1", features = ["rt", "sync"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }

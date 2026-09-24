@@ -1,0 +1,9 @@
+[package]
+name = "panedeck-jobs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+panedeck-domain = { path = "../panedeck-domain" }
+panedeck-fs = { path = "../panedeck-fs" }

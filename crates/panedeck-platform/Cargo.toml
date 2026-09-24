@@ -1,0 +1,15 @@
+[package]
+name = "panedeck-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+panedeck-domain = { path = "../panedeck-domain" }
+panedeck-fs = { path = "../panedeck-fs" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+trash = "5.2.9"
+
+[dev-dependencies]
+tempfile = "3"
