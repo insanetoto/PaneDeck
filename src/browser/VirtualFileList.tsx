@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type DragEvent,
+  type KeyboardEvent,
+  type MouseEvent,
+} from "react";
 import type { EntrySnapshot } from "../ipc/pathReferences";
 import { useI18n } from "../i18n/I18nProvider";
 import type { MessageKey } from "../i18n/messages";
@@ -7,15 +15,31 @@ import type { SortDirection, SortField } from "./directoryApi";
 const ROW_HEIGHT = 32;
 const OVERSCAN = 6;
 
+export function calculateVisibleRange(
+  scrollTop: number,
+  viewportHeight: number,
+  totalEntries: number,
+) {
+  const start = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN);
+  const count = Math.ceil(viewportHeight / ROW_HEIGHT) + OVERSCAN * 2;
+  return { start, count: Math.min(count, Math.max(0, totalEntries - start)) };
+}
+
 interface VirtualFileListProps {
+  cutEntryKeys?: ReadonlySet<string>;
   entries: EntrySnapshot[];
   onOpen: (entry: EntrySnapshot) => void;
+  onEntryContextMenu?: (entry: EntrySnapshot, x: number, y: number) => void;
+  onEntryDragEnd?: () => void;
+  onEntryDragStart?: (entry: EntrySnapshot) => void;
+  onEntryDrop?: (entry: EntrySnapshot, copy: boolean) => void;
+  onSelectionChange?: (entries: EntrySnapshot[]) => void;
   onSort: (field: SortField) => void;
   sortDirection: SortDirection;
   sortField: SortField;
 }
 
-function entryKey(entry: EntrySnapshot) {
+export function entryKey(entry: EntrySnapshot) {
   return `${entry.reference.sessionId}:${entry.reference.entryId}`;
 }
 
@@ -69,8 +93,14 @@ function kindMessageKey(kind: EntrySnapshot["kind"]): MessageKey {
 }
 
 export function VirtualFileList({
+  cutEntryKeys = new Set(),
   entries,
   onOpen,
+  onEntryContextMenu,
+  onEntryDragEnd,
+  onEntryDragStart,
+  onEntryDrop,
+  onSelectionChange,
   onSort,
   sortDirection,
   sortField,
@@ -82,6 +112,7 @@ export function VirtualFileList({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [focusedId, setFocusedId] = useState<string | null>(null);
   const [anchorId, setAnchorId] = useState<string | null>(null);
+  const [dropTargetId, setDropTargetId] = useState<string | null>(null);
   const sorted = useMemo(
     () => sortEntries(entries, sortField, sortDirection),
     [entries, sortDirection, sortField],
@@ -93,9 +124,12 @@ export function VirtualFileList({
   );
   const effectiveFocusedId = focusedId && validIds.has(focusedId) ? focusedId : null;
   const effectiveAnchorId = anchorId && validIds.has(anchorId) ? anchorId : null;
-  const start = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN);
-  const count = Math.ceil(viewportHeight / ROW_HEIGHT) + OVERSCAN * 2;
+  const { start, count } = calculateVisibleRange(scrollTop, viewportHeight, sorted.length);
   const visible = sorted.slice(start, start + count);
+
+  useEffect(() => {
+    onSelectionChange?.(sorted.filter((entry) => effectiveSelected.has(entryKey(entry))));
+  }, [effectiveSelected, onSelectionChange, sorted]);
 
   useEffect(() => {
     const viewport = viewportRef.current;
@@ -175,6 +209,7 @@ export function VirtualFileList({
       role="grid"
       aria-label={t("list.label")}
       aria-multiselectable="true"
+      aria-rowcount={sorted.length + 1}
       data-selected-count={effectiveSelected.size}
     >
       <div className="file-table-header" role="row">
@@ -184,10 +219,12 @@ export function VirtualFileList({
         <span role="columnheader">{header("modifiedAt", t("list.modified"))}</span>
       </div>
       <div
+        aria-activedescendant={effectiveFocusedId ? `file-row-${effectiveFocusedId}` : undefined}
         className="file-list-viewport"
         onKeyDown={handleKeyDown}
         onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
         ref={viewportRef}
+        role="rowgroup"
         tabIndex={0}
       >
         <div className="file-list-spacer" style={{ height: sorted.length * ROW_HEIGHT }}>
@@ -199,12 +236,54 @@ export function VirtualFileList({
                 aria-rowindex={index + 2}
                 aria-selected={effectiveSelected.has(id)}
                 className="file-row"
+                data-cut={cutEntryKeys.has(id)}
+                data-drop-target={dropTargetId === id}
                 data-focused={effectiveFocusedId === id}
+                draggable
+                id={`file-row-${id}`}
                 key={id}
                 onClick={(event: MouseEvent) =>
                   selectIndex(index, event.shiftKey, event.metaKey || event.ctrlKey)
                 }
                 onDoubleClick={() => onOpen(entry)}
+                onDragEnd={() => {
+                  setDropTargetId(null);
+                  onEntryDragEnd?.();
+                }}
+                onDragLeave={() => setDropTargetId((current) => (current === id ? null : current))}
+                onDragOver={(event: DragEvent) => {
+                  const directoryLike =
+                    entry.kind === "directory" || entry.symlinkTarget === "directory";
+                  if (!directoryLike) return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  if (entry.isReadOnly) {
+                    event.dataTransfer.dropEffect = "none";
+                    return;
+                  }
+                  event.dataTransfer.dropEffect = event.altKey ? "copy" : "move";
+                  setDropTargetId(id);
+                }}
+                onDragStart={(event) => {
+                  event.dataTransfer.effectAllowed = "copyMove";
+                  event.dataTransfer.setData("application/x-panedeck-entries", "internal");
+                  onEntryDragStart?.(entry);
+                }}
+                onDrop={(event) => {
+                  const directoryLike =
+                    entry.kind === "directory" || entry.symlinkTarget === "directory";
+                  if (!directoryLike) return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setDropTargetId(null);
+                  if (entry.isReadOnly) return;
+                  onEntryDrop?.(entry, event.altKey || event.dataTransfer.dropEffect === "copy");
+                }}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  if (!effectiveSelected.has(id)) selectIndex(index, false, false);
+                  onEntryContextMenu?.(entry, event.clientX, event.clientY);
+                }}
                 role="row"
                 style={{ height: ROW_HEIGHT, transform: `translateY(${index * ROW_HEIGHT}px)` }}
               >

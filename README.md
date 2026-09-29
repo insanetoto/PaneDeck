@@ -2,7 +2,7 @@
 
 PaneDeck 是一个面向 macOS 的双窗格文件整理工具。它希望让移动、复制、重命名、删除与批量整理变得更快，同时通过任务队列和冲突预检降低误操作成本。
 
-项目已完成工程初始化、质量门、核心模块边界、双语框架、设计令牌、双窗格导航与虚拟列表、外部变化同步、本地位置与收藏、文件操作预检和任务队列，以及安全复制、移动、重命名、新建文件夹与系统废纸篓核心；统一冲突解析和写操作 UI 接入尚未实现。
+项目已完成 MVP：工程质量门、核心模块边界、双语框架、双窗格导航与虚拟列表、外部变化同步、本地位置与收藏、文件操作预检和任务队列，以及安全复制、移动、剪切/粘贴、重命名、新建文件夹、系统废纸篓、统一冲突决策、任务抽屉、双窗格拖放、主动诊断导出与崩溃恢复提示。
 
 ## 当前产品定义
 
@@ -21,6 +21,7 @@ PaneDeck 是一个面向 macOS 的双窗格文件整理工具。它希望让移�
 首次参与开发请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 的完整协作步骤。
 品牌图标的设计语义与使用边界见 [branding/README.md](branding/README.md)。
 Rust 模块和依赖方向见 [docs/architecture.md](docs/architecture.md)。
+最终端到端证据、macOS 人工检查表、已知限制和本地运行说明见 [docs/mvp-acceptance.md](docs/mvp-acceptance.md)。
 
 ## 开发方式
 
@@ -34,12 +35,15 @@ Rust 模块和依赖方向见 [docs/architecture.md](docs/architecture.md)。
 npm install
 npm run dev
 npm test
+npm run test:e2e
 npm run check
 npm run build
 ```
 
 - `npm run dev`：启动 Vite 与 Tauri 开发窗口。
+- `npm run benchmark`：在系统临时目录生成固定数据，运行前端与 Rust 本地性能基准。
 - `npm test`：运行前端与 Rust workspace 测试。
+- `npm run test:e2e`：运行 MVP UI 流程和 Rust 临时目录端到端验收。
 - `npm run check`：依次检查 Cargo crate 边界、前端格式/lint/类型/测试，以及 Rust fmt/clippy/test。
 - `npm run format`：统一格式化前端、配置、Markdown 与 Rust 源码。
 - `npm run build`：生成本地 Release 可执行文件，不创建安装包或应用分发包。

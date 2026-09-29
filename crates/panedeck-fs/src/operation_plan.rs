@@ -108,9 +108,21 @@ pub enum OperationRequest {
         sources: Vec<NativePath>,
         destination_directory: NativePath,
     },
+    CopyTo {
+        source: NativePath,
+        target: NativePath,
+    },
+    MoveTo {
+        source: NativePath,
+        target: NativePath,
+    },
     Rename {
         source: NativePath,
         new_name: OsString,
+    },
+    RenameTo {
+        source: NativePath,
+        target: NativePath,
     },
     CreateDirectory {
         parent: NativePath,
@@ -291,8 +303,17 @@ impl OperationPlanner {
                 sources,
                 destination_directory,
             } => self.plan_transfer(OperationKind::Move, sources, destination_directory, probe),
+            OperationRequest::CopyTo { source, target } => {
+                self.plan_exact_transfer(OperationKind::Copy, source, target, probe)
+            }
+            OperationRequest::MoveTo { source, target } => {
+                self.plan_exact_transfer(OperationKind::Move, source, target, probe)
+            }
             OperationRequest::Rename { source, new_name } => {
                 self.plan_rename(source, new_name, probe)
+            }
+            OperationRequest::RenameTo { source, target } => {
+                self.plan_exact_transfer(OperationKind::Rename, source, target, probe)
             }
             OperationRequest::CreateDirectory { parent, name } => {
                 self.plan_create_directory(parent, name, probe)
@@ -367,6 +388,81 @@ impl OperationPlanner {
             }
         }
         Ok(())
+    }
+
+    fn plan_exact_transfer<P: PreflightProbe>(
+        &self,
+        kind: OperationKind,
+        source: NativePath,
+        target: NativePath,
+        probe: &P,
+    ) -> Result<OperationPlan, PlanValidationError> {
+        let source_state = required_source(probe, &source, 0)?;
+        if kind != OperationKind::Rename && !source_state.is_readable {
+            return Err(PlanValidationError::new(
+                PlanValidationErrorKind::SourceNotReadable { source_index: 0 },
+            ));
+        }
+        let source_identity = required_identity(source_state)?;
+        if source.as_path() == target.as_path() {
+            return Err(PlanValidationError::new(
+                PlanValidationErrorKind::SamePath { source_index: 0 },
+            ));
+        }
+        if source_state.kind == EntryKind::Directory
+            && target.as_path().starts_with(source.as_path())
+        {
+            return Err(PlanValidationError::new(
+                PlanValidationErrorKind::DirectoryIntoItself { source_index: 0 },
+            ));
+        }
+        if probe.inspect(target.as_path())?.is_some() {
+            return Err(PlanValidationError::new(
+                PlanValidationErrorKind::Conflict { target_index: 0 },
+            ));
+        }
+        let parent_path = target
+            .as_path()
+            .parent()
+            .ok_or_else(|| PlanValidationError::new(PlanValidationErrorKind::InvalidName))?;
+        let parent = NativePath::new(parent_path);
+        let parent_state = required_destination(probe, &parent)?;
+        if !parent_state.is_writable {
+            return Err(PlanValidationError::new(
+                PlanValidationErrorKind::ParentNotWritable,
+            ));
+        }
+        let parent_identity = required_identity(parent_state)?;
+        let source_parent = if matches!(kind, OperationKind::Move | OperationKind::Rename) {
+            Some(required_writable_parent(probe, &source)?)
+        } else {
+            None
+        };
+        let required_space = if kind == OperationKind::Copy
+            || (kind == OperationKind::Move
+                && source_identity.volume_id != parent_identity.volume_id)
+        {
+            probe.estimated_copy_bytes(source.as_path())?
+        } else {
+            None
+        };
+        Ok(OperationPlan {
+            kind,
+            sources: vec![PlannedSource {
+                path: source,
+                identity: source_identity,
+                kind: source_state.kind,
+                byte_len: source_state.byte_len,
+                parent: source_parent,
+            }],
+            targets: vec![PlannedTarget {
+                path: target,
+                parent: parent.clone(),
+                parent_identity,
+                expected_existing_identity: None,
+            }],
+            space_requirements: space_requirement(probe, parent, required_space)?,
+        })
     }
 
     fn plan_transfer<P: PreflightProbe>(

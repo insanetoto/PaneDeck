@@ -14,7 +14,9 @@ use crate::{
     OperationKind, OperationPlan, OperationPlanner, PlanValidationErrorKind, PreflightProbe,
 };
 
-const COPY_BUFFER_SIZE: usize = 1024 * 1024;
+// Large sequential transfers are the common path. Eight MiB amortizes syscall
+// overhead while cancellation and progress still remain responsive.
+const COPY_BUFFER_SIZE: usize = 8 * 1024 * 1024;
 static NEXT_STAGING_ID: AtomicU64 = AtomicU64::new(1);
 
 pub trait CopyCancellation {

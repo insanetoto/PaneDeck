@@ -6,6 +6,7 @@ const allowedWorkspaceDependencies = new Map([
   ["panedeck-jobs", ["panedeck-domain", "panedeck-fs"]],
   ["panedeck-platform", ["panedeck-domain", "panedeck-fs"]],
   ["panedeck-app", ["panedeck-domain", "panedeck-fs", "panedeck-jobs", "panedeck-platform"]],
+  ["panedeck-bench", ["panedeck-app", "panedeck-domain", "panedeck-fs"]],
   ["panedeck", ["panedeck-app"]],
 ]);
 

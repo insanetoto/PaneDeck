@@ -1,4 +1,4 @@
-use std::{fs, io};
+use std::{fs, io, path::Path};
 
 use crate::{
     OperationKind, OperationPlan, OperationPlanner, PlanValidationErrorKind, PreflightProbe,
@@ -28,11 +28,15 @@ impl MutationExecutor {
             .map_err(|error| map_validation_error(error.kind()))?;
         match plan.kind() {
             OperationKind::Rename if plan.sources().len() == 1 && plan.targets().len() == 1 => {
-                fs::rename(
-                    plan.sources()[0].native_path().as_path(),
-                    plan.targets()[0].native_path().as_path(),
-                )
-                .map_err(map_io_error)
+                let source = plan.sources()[0].native_path().as_path();
+                let target = plan.targets()[0].native_path().as_path();
+                if plan.targets()[0].expected_existing_identity()
+                    == Some(plan.sources()[0].identity())
+                {
+                    fs::rename(source, target).map_err(map_io_error)
+                } else {
+                    rename_no_replace(source, target)
+                }
             }
             OperationKind::CreateDirectory
                 if plan.sources().is_empty() && plan.targets().len() == 1 =>
@@ -42,6 +46,32 @@ impl MutationExecutor {
             _ => Err(MutationErrorCode::InvalidPlan),
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+pub fn rename_no_replace(source: &Path, target: &Path) -> Result<(), MutationErrorCode> {
+    use std::{ffi::CString, os::unix::ffi::OsStrExt};
+
+    let source =
+        CString::new(source.as_os_str().as_bytes()).map_err(|_| MutationErrorCode::InvalidName)?;
+    let target =
+        CString::new(target.as_os_str().as_bytes()).map_err(|_| MutationErrorCode::InvalidName)?;
+    // SAFETY: both values are valid NUL-terminated paths. RENAME_EXCL prevents
+    // replacing a target that appears after plan revalidation.
+    let result = unsafe { libc::renamex_np(source.as_ptr(), target.as_ptr(), libc::RENAME_EXCL) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(map_io_error(io::Error::last_os_error()))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn rename_no_replace(source: &Path, target: &Path) -> Result<(), MutationErrorCode> {
+    if fs::symlink_metadata(target).is_ok() {
+        return Err(MutationErrorCode::TargetConflict);
+    }
+    fs::rename(source, target).map_err(map_io_error)
 }
 
 fn map_validation_error(kind: &PlanValidationErrorKind) -> MutationErrorCode {

@@ -2245,6 +2245,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "panedeck-bench"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "panedeck-app",
+ "panedeck-domain",
+ "panedeck-fs",
+ "tokio",
+]
+
+[[package]]
 name = "panedeck-domain"
 version = "0.1.0"
 
@@ -2273,6 +2284,9 @@ dependencies = [
 name = "panedeck-platform"
 version = "0.1.0"
 dependencies = [
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
  "panedeck-domain",
  "panedeck-fs",
  "tempfile",

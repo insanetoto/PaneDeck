@@ -9,6 +9,9 @@ panedeck-domain = { path = "../panedeck-domain" }
 panedeck-fs = { path = "../panedeck-fs" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSPasteboard", "NSPasteboardItem"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSArray", "NSString", "NSURL", "std"] }
 trash = "5.2.9"
 
 [dev-dependencies]

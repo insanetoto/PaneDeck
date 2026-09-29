@@ -333,6 +333,40 @@ impl BrowserService {
         .await
     }
 
+    pub fn resolve_directory(
+        &self,
+        reference: DirectoryReferenceDto,
+    ) -> Result<NativePath, BrowseErrorDto> {
+        self.known_root(reference)
+    }
+
+    pub fn resolve_entries(
+        &self,
+        references: Vec<EntryReferenceDto>,
+    ) -> Result<Vec<NativePath>, BrowseErrorDto> {
+        let references = references
+            .into_iter()
+            .map(EntryReference::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| error(BrowseErrorCode::StaleReference))?;
+        let sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        references
+            .into_iter()
+            .map(|reference| {
+                sessions
+                    .sessions
+                    .get(&reference.session_id())
+                    .ok_or_else(|| error(BrowseErrorCode::StaleReference))?
+                    .resolve(reference)
+                    .map(|entry| entry.native_path().clone())
+                    .map_err(|_| error(BrowseErrorCode::StaleReference))
+            })
+            .collect()
+    }
+
     fn known_root(&self, reference: DirectoryReferenceDto) -> Result<NativePath, BrowseErrorDto> {
         let reference = panedeck_domain::DirectoryReference::try_from(reference)
             .map_err(|_| error(BrowseErrorCode::StaleReference))?;

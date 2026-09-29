@@ -1,18 +1,13 @@
 [package]
-name = "panedeck-app"
+name = "panedeck-bench"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [dependencies]
+libc = "0.2"
+panedeck-app = { path = "../panedeck-app" }
 panedeck-domain = { path = "../panedeck-domain" }
 panedeck-fs = { path = "../panedeck-fs" }
-panedeck-jobs = { path = "../panedeck-jobs" }
-panedeck-platform = { path = "../panedeck-platform" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-
-[dev-dependencies]
-serde_json = "1"
-tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
