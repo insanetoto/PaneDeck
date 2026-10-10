@@ -38,11 +38,12 @@ function EntryDetails({ entry, label }: { entry: ConflictEntry; label: string })
 
 interface ConflictDialogProps {
   job: OperationJob;
+  busy?: boolean;
   onClose: () => void;
   onResolve: (decision: ConflictDecision, applyToRemaining: boolean) => void;
 }
 
-export function ConflictDialog({ job, onClose, onResolve }: ConflictDialogProps) {
+export function ConflictDialog({ job, onClose, onResolve, busy = false }: ConflictDialogProps) {
   const { t } = useI18n();
   const [applyToRemaining, setApplyToRemaining] = useState(false);
   const safeDefault = useRef<HTMLButtonElement>(null);
@@ -50,11 +51,11 @@ export function ConflictDialog({ job, onClose, onResolve }: ConflictDialogProps)
   useEffect(() => safeDefault.current?.focus(), []);
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape" && !busy) onClose();
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [onClose]);
+  }, [onClose, busy]);
   if (!conflict) return null;
   const replaceLabel =
     conflict.kind === "directoryMerge" ? t("conflict.merge") : t("conflict.replace");
@@ -67,7 +68,12 @@ export function ConflictDialog({ job, onClose, onResolve }: ConflictDialogProps)
             <h2 id="conflict-title">{t("conflict.title")}</h2>
             <p>{t(`conflict.kind.${conflict.kind}` as MessageKey)}</p>
           </div>
-          <button aria-label={t("clipboard.cancel")} onClick={onClose} type="button">
+          <button
+            aria-label={t("clipboard.cancel")}
+            onClick={onClose}
+            disabled={busy}
+            type="button"
+          >
             ×
           </button>
         </header>
@@ -77,6 +83,7 @@ export function ConflictDialog({ job, onClose, onResolve }: ConflictDialogProps)
         </div>
         <label className="conflict-remaining">
           <input
+            disabled={busy}
             checked={applyToRemaining}
             onChange={(event) => setApplyToRemaining(event.target.checked)}
             type="checkbox"
@@ -84,21 +91,21 @@ export function ConflictDialog({ job, onClose, onResolve }: ConflictDialogProps)
           {t("conflict.applyRemaining")}
         </label>
         <div className="conflict-actions">
-          <button onClick={() => resolve("skip")} ref={safeDefault} type="button">
+          <button disabled={busy} onClick={() => resolve("skip")} ref={safeDefault} type="button">
             {t("conflict.skip")}
           </button>
-          <button onClick={() => resolve("keepBoth")} type="button">
+          <button disabled={busy} onClick={() => resolve("keepBoth")} type="button">
             {t("conflict.keepBoth")}
           </button>
           <button
             className="danger-action"
-            disabled={!conflict.replaceAllowed}
+            disabled={busy || !conflict.replaceAllowed}
             onClick={() => resolve("replace")}
             type="button"
           >
             {replaceLabel}
           </button>
-          <button onClick={() => resolve("cancel")} type="button">
+          <button disabled={busy} onClick={() => resolve("cancel")} type="button">
             {t("conflict.cancelTask")}
           </button>
         </div>

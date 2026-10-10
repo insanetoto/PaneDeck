@@ -1,5 +1,19 @@
+import { BottomFeedback } from "./jobs/BottomFeedback";
+import { OperationLogDialog } from "./jobs/OperationLogDialog";
+import { useOperationEvents } from "./jobs/useOperationEvents";
+import { DragInteraction, INTERNAL_DRAG_TYPE } from "./browser/dragInteraction";
+import { FileContextMenu } from "./commands/FileContextMenu";
+import {
+  captureMenu,
+  tauriContextMenuClient,
+  type CapturedMenu,
+  type ContextMenuClient,
+  type ContextCommand,
+} from "./commands/contextMenu";
+import { useDirectoryTree } from "./browser/useDirectoryTree";
 import {
   useCallback,
+  useMemo,
   useEffect,
   useRef,
   useState,
@@ -10,7 +24,29 @@ import {
   type RefObject,
 } from "react";
 import "./App.css";
-import { type Language, useI18n } from "./i18n/I18nProvider";
+import {
+  tauriDesktopMenuClient,
+  useDesktopMenu,
+  type DesktopMenuClient,
+  type DesktopCommand,
+  type DesktopMenuPresentation,
+} from "./commands/desktopMenu";
+import {
+  captureCommandContext,
+  isTextInput,
+  type CommandContext,
+  type CommandSource,
+  type TransferTarget,
+} from "./commands/context";
+import {
+  commandEnabled,
+  createCommandRouter,
+  dispatchWrite,
+  dispatchClipboard,
+  dispatchPaste,
+  type FileCommand,
+} from "./commands/dispatch";
+import { useI18n } from "./i18n/I18nProvider";
 import type { MessageKey } from "./i18n/messages";
 import {
   browseErrorCode,
@@ -46,6 +82,8 @@ import {
   tauriOperationClient,
   type OperationClient,
   type OperationJob,
+  type LogStatus,
+  type OperationLogSnapshot,
 } from "./browser/operationApi";
 import {
   tauriDiagnosticClient,
@@ -55,9 +93,8 @@ import {
 import { tauriRecoveryClient, type RecoveryClient, type RecoveryItem } from "./browser/recoveryApi";
 import type { EntrySnapshot } from "./ipc/pathReferences";
 import { ConflictDialog } from "./jobs/ConflictDialog";
-import { isActiveJob, TaskDrawer } from "./jobs/TaskDrawer";
+import { isActiveJob } from "./jobs/operationModel";
 
-const supportedLanguages: Language[] = ["zh-CN", "en"];
 const MIN_SPLIT_PERCENT = 28;
 const MAX_SPLIT_PERCENT = 72;
 const ACTIVE_TASKS_STORAGE_KEY = "panedeck.active-tasks.v1";
@@ -80,13 +117,28 @@ interface FilePaneProps {
   onDirectoryChange?: (listing: DirectoryListing | null) => void;
   onSelectionChange?: (entries: EntrySnapshot[]) => void;
   cutEntryKeys?: ReadonlySet<string>;
-  onEntryContextMenu?: (entry: EntrySnapshot, x: number, y: number) => void;
+  onEntryContextMenu?: (
+    entry: EntrySnapshot,
+    x: number,
+    y: number,
+    selection?: EntrySnapshot[],
+    expanded?: boolean,
+  ) => void;
+  onBlankContextMenu?: (x: number, y: number) => void;
   refreshToken?: number;
-  dragSourcePane?: PaneId | null;
+  dragToken?: string | null;
+  validateDrop?: (target: EntrySnapshot | null, copy: boolean) => Promise<boolean>;
   onEntryDragEnd?: () => void;
-  onEntryDragStart?: (entry: EntrySnapshot) => void;
+  onEntryDragStart?: (entry: EntrySnapshot, selection?: EntrySnapshot[]) => string | void;
   onEntryDrop?: (entry: EntrySnapshot, copy: boolean) => void;
   onPaneDrop?: (copy: boolean) => void;
+  onBrowseControls?: (controls: {
+    refresh: () => void;
+    toggleHidden: () => void;
+    showHidden: boolean;
+    open: (entry: EntrySnapshot) => void;
+    folder: (entry: EntrySnapshot, expand: boolean) => void;
+  }) => void;
 }
 
 export function FilePane({
@@ -104,12 +156,15 @@ export function FilePane({
   onSelectionChange,
   cutEntryKeys,
   onEntryContextMenu,
+  onBlankContextMenu,
   refreshToken = 0,
-  dragSourcePane = null,
+  dragToken = null,
+  validateDrop,
   onEntryDragEnd,
   onEntryDragStart,
   onEntryDrop,
   onPaneDrop,
+  onBrowseControls,
 }: FilePaneProps) {
   const { t } = useI18n();
   const [showHidden, setShowHidden] = useState(false);
@@ -120,12 +175,19 @@ export function FilePane({
   const [pathDraft, setPathDraft] = useState("");
   const [loading, setLoading] = useState(false);
   const [browseError, setBrowseError] = useState<BrowseErrorCode | null>(null);
-  const [paneDropTarget, setPaneDropTarget] = useState(false);
+  const [paneDropTarget, setPaneDropTarget] = useState<string | null>(null);
   const requestGeneration = useRef(0);
   const refreshRef = useRef<() => void>(() => undefined);
+  const deferredRefresh = useRef(false);
   const pathInputRef = useRef<HTMLInputElement>(null);
   const paneName = t(id === "left" ? "pane.left" : "pane.right");
   const current = history[historyIndex] ?? null;
+  const { tree, rows: treeRows } = useDirectoryTree(client, current, {
+    pane: id,
+    showHidden,
+    sortField,
+    sortDirection,
+  });
 
   useEffect(() => {
     onDirectoryChange?.(current);
@@ -146,6 +208,7 @@ export function FilePane({
   const runNavigation = async (
     action: () => Promise<DirectoryListing>,
     commit: (listing: DirectoryListing) => void,
+    invalidateOnFailure = false,
   ) => {
     const generation = ++requestGeneration.current;
     setLoading(true);
@@ -159,12 +222,15 @@ export function FilePane({
       if (generation !== requestGeneration.current) return;
       const code = browseErrorCode(error);
       if (code !== "cancelled") setBrowseError(code);
+      if (invalidateOnFailure && (code === "notFound" || code === "notDirectory"))
+        tree.invalidateRoot();
     } finally {
       if (generation === requestGeneration.current) setLoading(false);
     }
   };
 
   const pushListing = (listing: DirectoryListing) => {
+    deferredRefresh.current = false;
     setHistory((previous) => [...previous.slice(0, historyIndex + 1), listing].slice(-50));
     setHistoryIndex((previous) => Math.min(previous + 1, 49));
   };
@@ -210,37 +276,75 @@ export function FilePane({
     );
   };
 
-  const refreshCurrent = () => {
-    if (!current || loading) return;
-    void runNavigation(() => client.reopen(current.directory, options()), replaceListing);
+  const refreshCurrent = async () => {
+    if (!current) return;
+    if (loading) {
+      deferredRefresh.current = true;
+      return;
+    }
+    await runNavigation(() => client.reopen(current.directory, options()), replaceListing, true);
   };
   useEffect(() => {
     refreshRef.current = refreshCurrent;
   });
+  useEffect(() => {
+    if (!loading && deferredRefresh.current) {
+      deferredRefresh.current = false;
+      refreshRef.current();
+    }
+  }, [loading]);
 
   useEffect(() => {
-    if (refreshToken > 0) refreshRef.current();
-  }, [refreshToken]);
+    if (refreshToken > 0) {
+      refreshRef.current();
+      tree.refreshBranches();
+    }
+  }, [refreshToken, tree]);
 
-  const watchedDirectory = current?.directory;
   useEffect(() => {
-    if (!monitor || !watchedDirectory) return;
-    let disposed = false;
-    let stop: (() => void) | undefined;
-    void monitor
-      .start(id, watchedDirectory, () => refreshRef.current())
-      .then((cleanup) => {
-        if (disposed) cleanup();
-        else stop = cleanup;
-      })
-      .catch((error) => {
-        if (!disposed) setBrowseError(browseErrorCode(error));
-      });
-    return () => {
-      disposed = true;
-      stop?.();
-    };
-  }, [id, monitor, watchedDirectory]);
+    onBrowseControls?.({
+      refresh: () => {
+        void refreshCurrent();
+        tree.refreshBranches();
+      },
+      toggleHidden: () => {
+        const next = !showHidden;
+        setShowHidden(next);
+        updateView(next, sortField, sortDirection);
+      },
+      showHidden,
+      open: openEntry,
+      folder: (entry, expand) => {
+        const row = treeRows.find((row) =>
+          entry.treeKey
+            ? row.key === entry.treeKey
+            : row.entry.reference.sessionId === entry.reference.sessionId &&
+              row.entry.reference.entryId === entry.reference.entryId,
+        );
+        if (!row || row.entry.kind !== "directory") return;
+        if (expand && !row.expanded) void tree.expand(row.key);
+        else if (!expand && row.expanded) tree.collapse(row.key);
+      },
+    });
+  });
+
+  const rootRefresh = useRef<() => Promise<void>>(async () => {});
+  useEffect(() => {
+    rootRefresh.current = refreshCurrent;
+  });
+  useEffect(() => {
+    tree.setMonitor(
+      monitor,
+      () => rootRefresh.current(),
+      (reason) => setBrowseError(reason === "resourceLimit" ? "resourceLimit" : "io"),
+    );
+    return () =>
+      tree.setMonitor(
+        undefined,
+        async () => {},
+        () => {},
+      );
+  }, [tree, monitor]);
 
   const breadcrumbs = (() => {
     if (!current?.displayPath.startsWith("/")) return [];
@@ -255,6 +359,13 @@ export function FilePane({
     event.preventDefault();
     if (pathDraft.trim()) void openPath(pathDraft.trim());
   };
+  const [paneDrag] = useState(() => new DragInteraction());
+  const dropValidation = useRef(validateDrop);
+  useEffect(() => {
+    dropValidation.current = validateDrop;
+  }, [validateDrop]);
+  useEffect(() => () => paneDrag.clear(), [paneDrag, dragToken, current?.directory.sessionId]);
+  const [paneDropInvalid, setPaneDropInvalid] = useState<string | null>(null);
   const currentIsFavorite = current
     ? favorites.some((favorite) => favorite.path === current.displayPath)
     : false;
@@ -265,23 +376,44 @@ export function FilePane({
     <section
       aria-label={paneName}
       className="file-pane"
-      data-active={active}
-      data-drop-target={paneDropTarget}
+      data-drop-target={Boolean(dragToken) && paneDropTarget === dragToken}
+      data-drop-invalid={Boolean(dragToken) && paneDropInvalid === dragToken}
+      onDragEnter={(event) => {
+        if ((event.target as HTMLElement).closest(".file-row")) {
+          paneDrag.clear();
+          setPaneDropTarget(null);
+          setPaneDropInvalid(null);
+        }
+      }}
       onDragLeave={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-          setPaneDropTarget(false);
+          setPaneDropTarget(null);
+          setPaneDropInvalid(null);
+          paneDrag.clear();
         }
       }}
       onDragOver={(event) => {
-        if (!current || dragSourcePane === id) return;
+        if (!dragToken || !current || !event.dataTransfer.types.includes(INTERNAL_DRAG_TYPE))
+          return;
         event.preventDefault();
-        event.dataTransfer.dropEffect = event.altKey ? "copy" : "move";
-        setPaneDropTarget(true);
+        const copy = event.altKey;
+        const valid = paneDrag.target(
+          `${dragToken}:${current.directory.sessionId}:${copy}`,
+          () => dropValidation.current?.(null, copy) ?? Promise.resolve(false),
+          (allowed) => {
+            setPaneDropTarget(allowed ? dragToken : null);
+            setPaneDropInvalid(allowed ? null : dragToken);
+          },
+        );
+        event.dataTransfer.dropEffect = valid ? (copy ? "copy" : "move") : "none";
       }}
       onDrop={(event) => {
-        if (!current || dragSourcePane === id) return;
+        if (!dragToken || !current || event.dataTransfer.getData(INTERNAL_DRAG_TYPE) !== dragToken)
+          return;
         event.preventDefault();
-        setPaneDropTarget(false);
+        paneDrag.clear();
+        setPaneDropTarget(null);
+        setPaneDropInvalid(null);
         onPaneDrop?.(event.altKey || event.dataTransfer.dropEffect === "copy");
       }}
       onClick={() => onActivate(id)}
@@ -301,7 +433,6 @@ export function FilePane({
       <header className="pane-navigation">
         <div className="pane-identity">
           <span className="pane-side-label">{paneName}</span>
-          {active ? <span className="active-pane-badge">{t("pane.active")}</span> : null}
         </div>
         <div aria-label={t("pane.navigationActions")} className="navigation-actions">
           <button
@@ -331,7 +462,10 @@ export function FilePane({
           <button
             aria-label={t("pane.refresh")}
             disabled={!current || loading}
-            onClick={() => refreshRef.current()}
+            onClick={() => {
+              refreshRef.current();
+              tree.refreshBranches();
+            }}
             type="button"
           >
             <span aria-hidden="true">↻</span>
@@ -457,7 +591,16 @@ export function FilePane({
           </div>
         </aside>
 
-        <div className="file-area">
+        <div
+          className="file-area"
+          onContextMenu={(event) => {
+            const target = event.target as HTMLElement;
+            if (target.closest(".file-row, button, input, .file-table-header")) return;
+            event.preventDefault();
+            onActivate(id);
+            onBlankContextMenu?.(event.clientX, event.clientY);
+          }}
+        >
           {browseError ? (
             <div className="navigation-error" role="alert">
               <span>
@@ -465,7 +608,13 @@ export function FilePane({
                 {t(errorMessageKey(browseError))}
               </span>
               {current ? (
-                <button onClick={() => refreshRef.current()} type="button">
+                <button
+                  onClick={() => {
+                    refreshRef.current();
+                    tree.refreshBranches();
+                  }}
+                  type="button"
+                >
                   {t("pane.retry")}
                 </button>
               ) : null}
@@ -479,8 +628,32 @@ export function FilePane({
             <VirtualFileList
               cutEntryKeys={cutEntryKeys}
               entries={current.entries}
+              treeRows={treeRows}
+              onToggleTree={(key) => {
+                const row = treeRows.find((row) => row.key === key);
+                if (row?.expanded) tree.collapse(key);
+                else void tree.expand(key);
+              }}
+              onHoverExpand={(key) => {
+                void tree.expand(key);
+              }}
+              onRetryTree={(key) => tree.retry(key)}
               onOpen={openEntry}
-              onEntryContextMenu={onEntryContextMenu}
+              onEntryContextMenu={(entry, x, y, selection) =>
+                onEntryContextMenu?.(
+                  entry,
+                  x,
+                  y,
+                  selection,
+                  treeRows.find(
+                    (row) =>
+                      row.entry.reference.sessionId === entry.reference.sessionId &&
+                      row.entry.reference.entryId === entry.reference.entryId,
+                  )?.expanded ?? false,
+                )
+              }
+              dragToken={dragToken}
+              validateDrop={(entry, copy) => validateDrop?.(entry, copy) ?? Promise.resolve(false)}
               onEntryDragEnd={onEntryDragEnd}
               onEntryDragStart={onEntryDragStart}
               onEntryDrop={onEntryDrop}
@@ -534,6 +707,8 @@ export function FilePane({
 }
 
 interface AppProps {
+  contextMenuClient?: ContextMenuClient;
+  desktopMenuClient?: DesktopMenuClient;
   clipboardClient?: ClipboardClient;
   directoryClient?: DirectoryClient;
   locationsClient?: LocalLocationsClient;
@@ -544,6 +719,8 @@ interface AppProps {
 }
 
 function App({
+  contextMenuClient = tauriContextMenuClient,
+  desktopMenuClient = tauriDesktopMenuClient,
   clipboardClient = tauriClipboardClient,
   directoryClient = tauriDirectoryClient,
   locationsClient = tauriLocalLocationsClient,
@@ -553,6 +730,21 @@ function App({
   recoveryClient = tauriRecoveryClient,
 }: AppProps) {
   const { language, setLanguage, t } = useI18n();
+  const [textEditing, setTextEditing] = useState(false);
+  const [paneHidden, setPaneHidden] = useState({ left: false, right: false });
+  const browseControls = useRef<
+    Partial<
+      Record<
+        PaneId,
+        {
+          refresh: () => void;
+          toggleHidden: () => void;
+          open: (entry: EntrySnapshot) => void;
+          folder: (entry: EntrySnapshot, expand: boolean) => void;
+        }
+      >
+    >
+  >({});
   const [activePane, setActivePane] = useState<PaneId>("left");
   const [splitPercent, setSplitPercent] = useState(50);
   const [locations, setLocations] = useState<LocalLocation[]>([]);
@@ -570,7 +762,13 @@ function App({
   const [clipboardNotice, setClipboardNotice] = useState<string | null>(null);
   const [operationBusy, setOperationBusy] = useState(false);
   const [jobs, setJobs] = useState<OperationJob[]>([]);
-  const [taskDrawerOpen, setTaskDrawerOpen] = useState(false);
+  const [logView, setLogView] = useState<{
+    data: OperationLogSnapshot;
+    operationId?: string;
+  } | null>(null);
+  const [logStatus, setLogStatus] = useState<LogStatus[]>([]);
+  const [connectionFailed, setConnectionFailed] = useState(false);
+  const [deferredConflicts, setDeferredConflicts] = useState<Set<number>>(new Set());
   const [conflictJob, setConflictJob] = useState<OperationJob | null>(null);
   const [diagnosticPreview, setDiagnosticPreview] = useState<DiagnosticPreview | null>(null);
   const [diagnosticDestination, setDiagnosticDestination] = useState("");
@@ -578,21 +776,32 @@ function App({
   const [interruptedTasks, setInterruptedTasks] = useState(
     () => window.localStorage.getItem(ACTIVE_TASKS_STORAGE_KEY) !== null,
   );
-  const [dragState, setDragState] = useState<{
-    sourcePane: PaneId;
-    entries: EntrySnapshot[];
-  } | null>(null);
+  const [dragState, setDragState] = useState<{ token: string; context: CommandContext } | null>(
+    null,
+  );
+  const dragSessionRef = useRef<typeof dragState>(null);
+  const clearDrag = useCallback(() => {
+    dragSessionRef.current = null;
+    setDragState(null);
+  }, []);
+  useEffect(() => {
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") clearDrag();
+    };
+    window.addEventListener("keydown", escape);
+    window.addEventListener("blur", clearDrag);
+    return () => {
+      window.removeEventListener("keydown", escape);
+      window.removeEventListener("blur", clearDrag);
+    };
+  }, [clearDrag]);
   const [refreshToken, setRefreshToken] = useState(0);
   const [commandDialog, setCommandDialog] = useState<{
     type: "rename" | "createDirectory" | "trash";
-    entries: EntrySnapshot[];
+    context: CommandContext;
   } | null>(null);
   const [commandName, setCommandName] = useState("");
-  const [contextMenu, setContextMenu] = useState<{
-    entry: EntrySnapshot;
-    x: number;
-    y: number;
-  } | null>(null);
+  const [contextMenu, setContextMenu] = useState<CapturedMenu | null>(null);
   const workspaceRef = useRef<HTMLDivElement>(null);
   const leftPaneRef = useRef<HTMLElement>(null);
   const rightPaneRef = useRef<HTMLElement>(null);
@@ -643,7 +852,9 @@ function App({
   useEffect(() => {
     const closeTopDialog = (event: globalThis.KeyboardEvent) => {
       if (event.key !== "Escape") return;
-      if (diagnosticPreview) {
+      if (logView) {
+        setLogView(null);
+      } else if (diagnosticPreview) {
         setDiagnosticPreview(null);
       } else if (commandDialog) {
         setCommandDialog(null);
@@ -655,43 +866,36 @@ function App({
     };
     window.addEventListener("keydown", closeTopDialog);
     return () => window.removeEventListener("keydown", closeTopDialog);
-  }, [clipboardClient, commandDialog, diagnosticPreview, pasteDraft]);
+  }, [clipboardClient, commandDialog, diagnosticPreview, pasteDraft, logView]);
+
+  useOperationEvents(
+    operationClient,
+    (snapshot) => {
+      const next = snapshot.jobs;
+      setJobs(next);
+      setLogStatus([snapshot.logStatus, snapshot.recoveryLogStatus]);
+      setConnectionFailed(false);
+      let terminalChanged = false;
+      for (const job of next) {
+        if (!isActiveJob(job) && !terminalJobsSeen.current.has(job.jobId)) {
+          terminalJobsSeen.current.add(job.jobId);
+          terminalChanged = true;
+        }
+      }
+      if (terminalChanged) setRefreshToken((value) => value + 1);
+    },
+    () => setConnectionFailed(true),
+  );
 
   useEffect(() => {
-    let disposed = false;
-    const refreshJobs = async () => {
-      try {
-        const next = await operationClient.listJobs();
-        if (disposed) return;
-        setJobs(next);
-        const active = next.filter(isActiveJob);
-        if (active.length) {
-          window.localStorage.setItem(
-            ACTIVE_TASKS_STORAGE_KEY,
-            JSON.stringify(active.map((job) => job.jobId)),
-          );
-        } else {
-          window.localStorage.removeItem(ACTIVE_TASKS_STORAGE_KEY);
-        }
-        let terminalChanged = false;
-        for (const job of next) {
-          if (!isActiveJob(job) && !terminalJobsSeen.current.has(job.jobId)) {
-            terminalJobsSeen.current.add(job.jobId);
-            terminalChanged = true;
-          }
-        }
-        if (terminalChanged) setRefreshToken((value) => value + 1);
-      } catch {
-        // Tauri is unavailable in isolated web tests and previews.
-      }
-    };
-    void refreshJobs();
-    const timer = window.setInterval(() => void refreshJobs(), 250);
-    return () => {
-      disposed = true;
-      window.clearInterval(timer);
-    };
-  }, [operationClient]);
+    const active = jobs.filter(isActiveJob);
+    if (active.length)
+      window.localStorage.setItem(
+        ACTIVE_TASKS_STORAGE_KEY,
+        JSON.stringify(active.map((job) => job.jobId)),
+      );
+    else window.localStorage.removeItem(ACTIVE_TASKS_STORAGE_KEY);
+  }, [jobs]);
 
   const updateFavorites = (next: LocalFavorite[]) => {
     setFavorites(next);
@@ -729,15 +933,17 @@ function App({
       [],
   );
 
-  const setClipboard = async (intent: "copy" | "cut", explicit?: EntrySnapshot[]) => {
-    const entries = explicit ?? paneSelections[activePane];
-    if (!entries.length) return;
+  const getContext = (
+    source: CommandSource = "toolbar",
+    pane: PaneId = activePane,
+    entries: readonly EntrySnapshot[] = paneSelections[pane],
+    target?: TransferTarget | null,
+  ) => captureCommandContext(source, pane, paneListings, entries, target);
+
+  const setClipboard = async (intent: "copy" | "cut", context = getContext()) => {
+    if (!commandEnabled(intent, context)) return;
     try {
-      const next = await clipboardClient.set(
-        activePane,
-        intent,
-        entries.map((entry) => entry.reference),
-      );
+      const next = await dispatchClipboard(clipboardClient, intent, context);
       setClipboardState(next);
       setClipboardNotice(
         t(intent === "cut" ? "clipboard.cutReady" : "clipboard.copyReady").replace(
@@ -751,10 +957,22 @@ function App({
   };
 
   const finishOperation = (job: OperationJob) => {
-    setJobs((current) => [job, ...current.filter((item) => item.jobId !== job.jobId)]);
-    setTaskDrawerOpen(true);
-    window.localStorage.setItem(ACTIVE_TASKS_STORAGE_KEY, JSON.stringify([job.jobId]));
-    setClipboardNotice(t("operation.queued"));
+    setJobs((current) =>
+      current.some((item) => item.jobId === job.jobId) ? current : [job, ...current],
+    );
+    if (!isActiveJob(job)) setRefreshToken((value) => value + 1);
+  };
+  const openLog = (operationId?: string) => {
+    void (
+      operationClient.getLog?.() ??
+      Promise.resolve({
+        events: [],
+        status: { persistenceEnabled: false, failedWrites: 0, lastError: null },
+        recoveryStatus: { persistenceEnabled: false, failedWrites: 0, lastError: null },
+      })
+    )
+      .then((data) => setLogView({ data, operationId }))
+      .catch(() => setClipboardNotice(t("feedback.logFailed")));
   };
 
   const runOperation = async (operation: () => Promise<OperationJob>) => {
@@ -774,7 +992,9 @@ function App({
     void operationClient
       .cancel(jobId)
       .then((job) =>
-        setJobs((current) => current.map((item) => (item.jobId === jobId ? job : item))),
+        setJobs((current) =>
+          current.map((item) => (item.jobId === jobId && isActiveJob(item) ? job : item)),
+        ),
       )
       .catch(() => setClipboardNotice(t("operation.failed")));
   };
@@ -784,11 +1004,21 @@ function App({
     decision: "skip" | "replace" | "keepBoth" | "cancel",
     applyToRemaining: boolean,
   ) => {
+    if (operationBusy) return;
+    setOperationBusy(true);
     setConflictJob(null);
+    setDeferredConflicts((current) => new Set(current).add(job.jobId));
     void operationClient
       .resolveConflict(job.jobId, decision, applyToRemaining)
-      .then(finishOperation)
-      .catch(() => setClipboardNotice(t("operation.failed")));
+      .then((next) => {
+        setJobs((current) => current.filter((item) => item.jobId !== job.jobId));
+        finishOperation(next);
+      })
+      .catch(() => {
+        setConflictJob(job);
+        setClipboardNotice(t("operation.failed"));
+      })
+      .finally(() => setOperationBusy(false));
   };
 
   const openDiagnostics = () => {
@@ -824,73 +1054,114 @@ function App({
       .catch(() => setClipboardNotice(t("recovery.cleanupFailed")));
   };
 
-  const transfer = (kind: "copy" | "move", explicit?: EntrySnapshot[]) => {
-    const entries = explicit ?? paneSelections[activePane];
-    const destinationPane: PaneId = activePane === "left" ? "right" : "left";
-    const destination = paneListings[destinationPane]?.directory;
-    if (!entries.length || !destination) return;
-    void runOperation(() =>
-      operationClient.transfer(
-        kind,
-        entries.map((entry) => entry.reference),
-        destination,
-      ),
-    );
+  const transfer = (kind: "copy" | "move", context = getContext()) => {
+    const command = kind === "copy" ? "copyToOther" : "moveToOther";
+    if (!commandEnabled(command, context, operationBusy)) return;
+    void runOperation(() => dispatchWrite(operationClient, command, context));
   };
 
-  const dropOnPane = (targetPane: PaneId, copy: boolean) => {
-    if (!dragState || dragState.sourcePane === targetPane) return;
-    const destination = paneListings[targetPane]?.directory;
-    if (!destination) return;
-    void runOperation(() =>
-      operationClient.transfer(
-        copy ? "copy" : "move",
-        dragState.entries.map((entry) => entry.reference),
-        destination,
-      ),
+  const beginDrag = (pane: PaneId, entry: EntrySnapshot, selection?: EntrySnapshot[]) => {
+    activatePane(pane);
+    const selected = paneSelections[pane].some(
+      (item) =>
+        item.reference.sessionId === entry.reference.sessionId &&
+        item.reference.entryId === entry.reference.entryId,
     );
-    setDragState(null);
+    const session = {
+      token: crypto.randomUUID(),
+      context: getContext("drag", pane, selection ?? (selected ? paneSelections[pane] : [entry])),
+    };
+    dragSessionRef.current = session;
+    setDragState(session);
+    return session.token;
   };
-
-  const dropOnEntry = (target: EntrySnapshot, copy: boolean) => {
-    if (!dragState || target.isReadOnly) return;
-    const targetKey = `${target.reference.sessionId}:${target.reference.entryId}`;
+  const dragContext = (
+    pane: PaneId,
+    entry: EntrySnapshot | null,
+    delivered = false,
+  ): CommandContext | null => {
+    const session = dragSessionRef.current;
+    const root = paneListings[pane];
+    if (!session || operationBusy || !root || (!delivered && entry?.isReadOnly)) return null;
     if (
-      dragState.entries.some(
-        (entry) => `${entry.reference.sessionId}:${entry.reference.entryId}` === targetKey,
+      !delivered &&
+      entry &&
+      session.context.entries.some(
+        (source) =>
+          (source.treeKey && source.treeKey === entry.treeKey) ||
+          (source.reference.sessionId === entry.reference.sessionId &&
+            source.reference.entryId === entry.reference.entryId),
       )
-    ) {
+    )
+      return null;
+    if (
+      !delivered &&
+      !entry &&
+      session.context.entries.some(
+        (source) => source.reference.sessionId === root.directory.sessionId,
+      )
+    )
+      return null;
+    if (entry && !(entry.kind === "directory" || entry.symlinkTarget === "directory")) return null;
+    return {
+      ...session.context,
+      target: entry
+        ? { kind: "entry", pane, entry: entry.reference }
+        : { kind: "directory", pane, directory: root.directory },
+    };
+  };
+  const validateDrag = async (pane: PaneId, entry: EntrySnapshot | null, copy: boolean) => {
+    const token = dragSessionRef.current?.token;
+    const context = dragContext(pane, entry);
+    if (!context) return false;
+    try {
+      await operationClient.validateTransfer?.(
+        copy ? "copy" : "move",
+        context.entries.map((item) => item.reference),
+        context.target!,
+      );
+      return Boolean(token && dragSessionRef.current?.token === token);
+    } catch {
+      return false;
+    }
+  };
+  const drop = async (pane: PaneId, entry: EntrySnapshot | null, copy: boolean) => {
+    const context = dragContext(pane, entry, true);
+    clearDrag();
+    if (!context) {
       setClipboardNotice(t("operation.invalidDrop"));
-      setDragState(null);
       return;
     }
-    void runOperation(() =>
-      operationClient.transferToEntry(
-        copy ? "copy" : "move",
-        dragState.entries.map((entry) => entry.reference),
-        target.reference,
-      ),
-    );
-    setDragState(null);
+    // A delivered drop owns its captured context; the following native dragend only clears UI.
+    setOperationBusy(true);
+    try {
+      finishOperation(
+        await dispatchWrite(operationClient, copy ? "copyToOther" : "moveToOther", context),
+      );
+    } catch {
+      setClipboardNotice(t("operation.invalidDrop"));
+    } finally {
+      setOperationBusy(false);
+    }
   };
 
-  const openRename = (entries = paneSelections[activePane]) => {
-    if (entries.length !== 1) return;
-    setCommandName(entries[0].displayName);
-    setCommandDialog({ type: "rename", entries });
+  const openRename = (context = getContext()) => {
+    if (!commandEnabled("rename", context, operationBusy)) return;
+    setCommandName(context.entries[0].displayName);
+    setCommandDialog({ type: "rename", context });
     setContextMenu(null);
   };
 
-  const openCreateDirectory = () => {
-    if (!paneListings[activePane]) return;
+  const openCreateDirectory = (context = getContext()) => {
+    if (!commandEnabled("newFolder", context, operationBusy)) return;
     setCommandName("");
-    setCommandDialog({ type: "createDirectory", entries: [] });
+    setCommandDialog({ type: "createDirectory", context });
     setContextMenu(null);
   };
 
-  const openTrash = (entries = paneSelections[activePane]) => {
-    if (!entries.length) return;
-    setCommandDialog({ type: "trash", entries });
+  const openTrash = (context = getContext()) => {
+    if (!commandEnabled("trash", context, operationBusy)) return;
+    setCommandDialog({ type: "trash", context });
     setContextMenu(null);
   };
 
@@ -898,83 +1169,139 @@ function App({
     if (!commandDialog) return;
     const dialog = commandDialog;
     setCommandDialog(null);
-    if (dialog.type === "rename") {
-      if (!commandName.trim()) return;
-      void runOperation(() => operationClient.rename(dialog.entries[0].reference, commandName));
-    } else if (dialog.type === "createDirectory") {
-      const directory = paneListings[activePane]?.directory;
-      if (!directory || !commandName.trim()) return;
-      void runOperation(() => operationClient.createDirectory(directory, commandName));
-    } else {
-      void runOperation(() =>
-        operationClient.trash(dialog.entries.map((entry) => entry.reference)),
+    const command = dialog.type === "createDirectory" ? "newFolder" : dialog.type;
+    if (command !== "trash" && !commandName.trim()) return;
+    void runOperation(() => dispatchWrite(operationClient, command, dialog.context, commandName));
+  };
+
+  const preparePaste = async (context = getContext()) => {
+    try {
+      setPasteDraft(
+        await dispatchPaste(clipboardClient, context, clipboardState?.sourcePane ?? undefined),
+      );
+      setContextMenu(null);
+      setClipboardNotice(null);
+    } catch {
+      setClipboardNotice(
+        t(context.directory || context.target ? "clipboard.error" : "clipboard.noTarget"),
       );
     }
   };
 
-  const preparePaste = async () => {
-    const source = clipboardState?.sourcePane;
-    const otherPane: PaneId = source === "left" ? "right" : "left";
-    const preferred = source && paneListings[otherPane] ? otherPane : activePane;
-    const fallback: PaneId = preferred === "left" ? "right" : "left";
-    const target = paneListings[preferred] ? preferred : paneListings[fallback] ? fallback : null;
-    if (!target) {
-      setClipboardNotice(t("clipboard.noTarget"));
-      return;
+  const routeCommand = createCommandRouter(
+    {
+      transfer,
+      clipboard: (intent, context) => {
+        void setClipboard(intent, context);
+      },
+      paste: (context) => {
+        void preparePaste(context);
+      },
+      dialog: (kind, context) => {
+        if (kind === "rename") openRename(context);
+        else if (kind === "newFolder") openCreateDirectory(context);
+        else openTrash(context);
+      },
+    },
+    operationBusy,
+  );
+  const dispatchCommand = (command: FileCommand, context = getContext()) =>
+    routeCommand(command, context);
+
+  const menuContext = useMemo(
+    () => captureCommandContext("menu", activePane, paneListings, paneSelections[activePane]),
+    [activePane, paneListings, paneSelections],
+  );
+  const pendingConflict = jobs.find(
+    (job) => job.state === "awaitingDecision" && job.conflict && !deferredConflicts.has(job.jobId),
+  );
+  const visibleConflict =
+    conflictJob ??
+    (!commandDialog && !pasteDraft && !diagnosticPreview && !logView && !operationBusy
+      ? pendingConflict
+      : null);
+  const modalOpen = Boolean(
+    commandDialog || pasteDraft || diagnosticPreview || visibleConflict || logView,
+  );
+  const menuPresentation = useMemo<DesktopMenuPresentation>(() => {
+    const enabledCommands: DesktopCommand[] = ["languageEnglish", "languageChinese"];
+    if (!modalOpen) enabledCommands.push("diagnostics", "operationLog");
+    if (!textEditing && !modalOpen) {
+      for (const command of [
+        "copyToOther",
+        "moveToOther",
+        "copy",
+        "cut",
+        "paste",
+        "rename",
+        "newFolder",
+        "trash",
+      ] as const) {
+        if (commandEnabled(command, menuContext, operationBusy)) enabledCommands.push(command);
+      }
+      if (menuContext.directory) enabledCommands.push("refresh", "toggleHidden");
     }
-    try {
-      setPasteDraft(await clipboardClient.prepare(target, paneListings[target]!.directory));
-      setClipboardNotice(null);
-    } catch {
-      setClipboardNotice(t("clipboard.error"));
-    }
+    return { language, enabledCommands, textEditing, showHidden: paneHidden[activePane] };
+  }, [language, textEditing, modalOpen, menuContext, operationBusy, paneHidden, activePane]);
+  const desktopMenu = useDesktopMenu(
+    desktopMenuClient,
+    menuPresentation,
+    menuContext,
+    (command, context) => {
+      if (command === "languageEnglish" || command === "languageChinese") {
+        setLanguage(command === "languageEnglish" ? "en" : "zh-CN");
+      } else if (command === "diagnostics") openDiagnostics();
+      else if (command === "operationLog") openLog();
+      else if (command === "refresh") browseControls.current[context.pane]?.refresh();
+      else if (command === "toggleHidden") browseControls.current[context.pane]?.toggleHidden();
+      else if (!isTextInput(document.activeElement) && !modalOpen)
+        dispatchCommand(command, context);
+    },
+  );
+  const updateBrowseControls = (
+    pane: PaneId,
+    controls: {
+      refresh: () => void;
+      toggleHidden: () => void;
+      showHidden: boolean;
+      open: (entry: EntrySnapshot) => void;
+      folder: (entry: EntrySnapshot, expand: boolean) => void;
+    },
+  ) => {
+    browseControls.current[pane] = controls;
+    setPaneHidden((current) =>
+      current[pane] === controls.showHidden ? current : { ...current, [pane]: controls.showHidden },
+    );
   };
 
   const handleShortcut = (event: ReactKeyboardEvent<HTMLElement>) => {
-    const target = event.target as HTMLElement;
-    if (target.matches("input, textarea, [contenteditable='true']")) return;
-    if (event.key === "F5" || event.key === "F6" || event.key === "F2") {
-      event.preventDefault();
-      if (event.key === "F5") transfer("copy");
-      else if (event.key === "F6") transfer("move");
-      else openRename();
-      return;
+    if (event.defaultPrevented || isTextInput(event.target) || modalOpen) return;
+    if (event.altKey || event.ctrlKey) return;
+    let command: FileCommand | undefined;
+    if (!event.metaKey && !event.shiftKey) {
+      command = ({ F5: "copyToOther", F6: "moveToOther", F2: "rename" } as const)[
+        event.key as "F5" | "F6" | "F2"
+      ];
+    } else if (event.metaKey) {
+      const key = event.key.toLowerCase();
+      if (event.shiftKey && key === "n") command = "newFolder";
+      else if (!event.shiftKey)
+        command = ({ c: "copy", x: "cut", v: "paste", backspace: "trash" } as const)[
+          key as "c" | "x" | "v" | "backspace"
+        ];
     }
-    if (event.metaKey && event.shiftKey && event.key.toLowerCase() === "n") {
-      event.preventDefault();
-      openCreateDirectory();
-      return;
-    }
-    if (event.metaKey && event.key === "Backspace") {
-      event.preventDefault();
-      openTrash();
-      return;
-    }
-    if (!event.metaKey || event.altKey || event.ctrlKey) return;
-    const key = event.key.toLowerCase();
-    if (key === "c" || key === "x") {
-      event.preventDefault();
-      void setClipboard(key === "x" ? "cut" : "copy");
-    } else if (key === "v") {
-      event.preventDefault();
-      void preparePaste();
-    }
+    if (!command) return;
+    if (desktopMenu.active) return;
+    event.preventDefault();
+    dispatchCommand(command, getContext("keyboard"));
   };
-
-  const activeSelection = paneSelections[activePane];
-  const otherPane: PaneId = activePane === "left" ? "right" : "left";
-  const hasTransferTarget = Boolean(paneListings[otherPane]);
-  const selectionDisabledReason = activeSelection.length
-    ? undefined
-    : t("operation.disabled.selection");
-  const transferDisabledReason =
-    selectionDisabledReason ??
-    (hasTransferTarget ? undefined : t("operation.disabled.destination"));
 
   return (
     <main
       aria-label={t("app.name")}
       className="app-shell"
+      onFocusCapture={(event) => setTextEditing(isTextInput(event.target))}
+      onPointerDownCapture={(event) => setTextEditing(isTextInput(event.target))}
       onKeyDown={(event) => {
         handleShortcut(event);
         if (event.defaultPrevented) return;
@@ -983,106 +1310,13 @@ function App({
         activatePane(activePane === "left" ? "right" : "left", true);
       }}
     >
-      <header className="app-toolbar">
-        <div className="compact-brand">
-          <span aria-hidden="true" className="brand-mark">
-            <span />
-            <span />
-          </span>
-          <div>
-            <strong>{t("app.name")}</strong>
-            <span>{t("app.tagline")}</span>
-          </div>
-        </div>
-
-        <div aria-label={t("operation.toolbar")} className="operation-toolbar">
-          <button
-            disabled={Boolean(transferDisabledReason) || operationBusy}
-            onClick={() => transfer("copy")}
-            title={transferDisabledReason}
-            type="button"
-          >
-            {t("operation.copy")}
-          </button>
-          <button
-            disabled={Boolean(transferDisabledReason) || operationBusy}
-            onClick={() => transfer("move")}
-            title={transferDisabledReason}
-            type="button"
-          >
-            {t("operation.move")}
-          </button>
-          <button
-            disabled={Boolean(selectionDisabledReason) || operationBusy}
-            onClick={() => void setClipboard("cut")}
-            title={selectionDisabledReason}
-            type="button"
-          >
-            {t("operation.cut")}
-          </button>
-          <button
-            disabled={!paneListings[activePane] || operationBusy}
-            onClick={() => void preparePaste()}
-            title={!paneListings[activePane] ? t("operation.disabled.destination") : undefined}
-            type="button"
-          >
-            {t("operation.paste")}
-          </button>
-          <button
-            disabled={activeSelection.length !== 1 || operationBusy}
-            onClick={() => openRename()}
-            title={activeSelection.length !== 1 ? t("operation.disabled.single") : undefined}
-            type="button"
-          >
-            {t("operation.rename")}
-          </button>
-          <button
-            disabled={!paneListings[activePane] || operationBusy}
-            onClick={openCreateDirectory}
-            title={!paneListings[activePane] ? t("operation.disabled.destination") : undefined}
-            type="button"
-          >
-            {t("operation.newFolder")}
-          </button>
-          <button
-            disabled={Boolean(selectionDisabledReason) || operationBusy}
-            onClick={() => openTrash()}
-            title={selectionDisabledReason}
-            type="button"
-          >
-            {t("operation.trash")}
-          </button>
-          <button onClick={() => setTaskDrawerOpen((value) => !value)} type="button">
-            {t("task.button").replace("{count}", String(jobs.filter(isActiveJob).length))}
-          </button>
-          <button onClick={openDiagnostics} type="button">
-            {t("diagnostic.button")}
-          </button>
-        </div>
-
-        <div className="toolbar-actions">
-          <span className="keyboard-hint">{t("pane.tabHint")}</span>
-          <div aria-label={t("language.label")} className="segmented-control">
-            {supportedLanguages.map((candidate) => (
-              <button
-                aria-pressed={language === candidate}
-                key={candidate}
-                onClick={() => setLanguage(candidate)}
-                type="button"
-              >
-                {t(candidate === "zh-CN" ? "language.zhCNShort" : "language.enShort")}
-              </button>
-            ))}
-          </div>
-        </div>
-      </header>
-
       <div className="workspace" ref={workspaceRef} style={workspaceStyle}>
         <FilePane
           active={activePane === "left"}
           client={directoryClient}
           favorites={favorites}
           id="left"
+          onBrowseControls={(controls) => updateBrowseControls("left", controls)}
           locations={locations}
           monitor={monitor}
           onAddFavorite={addFavorite}
@@ -1091,26 +1325,40 @@ function App({
           onDirectoryChange={onLeftDirectoryChange}
           onSelectionChange={onLeftSelectionChange}
           cutEntryKeys={cutEntryKeys}
-          dragSourcePane={dragState?.sourcePane}
-          onEntryContextMenu={(entry, x, y) => {
-            activatePane("left");
-            setContextMenu({ entry, x, y });
-          }}
-          onEntryDragEnd={() => setDragState(null)}
-          onEntryDragStart={(entry) => {
+          dragToken={dragState?.token}
+          validateDrop={(entry, copy) => validateDrag("left", entry, copy)}
+          onEntryContextMenu={(entry, x, y, selection, expanded) => {
             activatePane("left");
             const selected = paneSelections.left.some(
-              (candidate) =>
-                candidate.reference.sessionId === entry.reference.sessionId &&
-                candidate.reference.entryId === entry.reference.entryId,
+              (item) =>
+                item.reference.sessionId === entry.reference.sessionId &&
+                item.reference.entryId === entry.reference.entryId,
             );
-            setDragState({
-              sourcePane: "left",
-              entries: selected ? paneSelections.left : [entry],
-            });
+            setContextMenu(
+              captureMenu(
+                getContext(
+                  "contextMenu",
+                  "left",
+                  selection ?? (selected ? paneSelections.left : [entry]),
+                ),
+                x,
+                y,
+                expanded,
+              ),
+            );
           }}
-          onEntryDrop={dropOnEntry}
-          onPaneDrop={(copy) => dropOnPane("left", copy)}
+          onBlankContextMenu={(x, y) => {
+            activatePane("left");
+            setContextMenu(captureMenu(getContext("blankMenu", "left", []), x, y));
+          }}
+          onEntryDragEnd={clearDrag}
+          onEntryDragStart={(entry, selection) => beginDrag("left", entry, selection)}
+          onEntryDrop={(target, copy) => {
+            void drop("left", target, copy);
+          }}
+          onPaneDrop={(copy) => {
+            void drop("left", null, copy);
+          }}
           paneRef={leftPaneRef}
           refreshToken={refreshToken}
         />
@@ -1153,6 +1401,7 @@ function App({
           client={directoryClient}
           favorites={favorites}
           id="right"
+          onBrowseControls={(controls) => updateBrowseControls("right", controls)}
           locations={locations}
           monitor={monitor}
           onAddFavorite={addFavorite}
@@ -1161,35 +1410,69 @@ function App({
           onDirectoryChange={onRightDirectoryChange}
           onSelectionChange={onRightSelectionChange}
           cutEntryKeys={cutEntryKeys}
-          dragSourcePane={dragState?.sourcePane}
-          onEntryContextMenu={(entry, x, y) => {
-            activatePane("right");
-            setContextMenu({ entry, x, y });
-          }}
-          onEntryDragEnd={() => setDragState(null)}
-          onEntryDragStart={(entry) => {
+          dragToken={dragState?.token}
+          validateDrop={(entry, copy) => validateDrag("right", entry, copy)}
+          onEntryContextMenu={(entry, x, y, selection, expanded) => {
             activatePane("right");
             const selected = paneSelections.right.some(
-              (candidate) =>
-                candidate.reference.sessionId === entry.reference.sessionId &&
-                candidate.reference.entryId === entry.reference.entryId,
+              (item) =>
+                item.reference.sessionId === entry.reference.sessionId &&
+                item.reference.entryId === entry.reference.entryId,
             );
-            setDragState({
-              sourcePane: "right",
-              entries: selected ? paneSelections.right : [entry],
-            });
+            setContextMenu(
+              captureMenu(
+                getContext(
+                  "contextMenu",
+                  "right",
+                  selection ?? (selected ? paneSelections.right : [entry]),
+                ),
+                x,
+                y,
+                expanded,
+              ),
+            );
           }}
-          onEntryDrop={dropOnEntry}
-          onPaneDrop={(copy) => dropOnPane("right", copy)}
+          onBlankContextMenu={(x, y) => {
+            activatePane("right");
+            setContextMenu(captureMenu(getContext("blankMenu", "right", []), x, y));
+          }}
+          onEntryDragEnd={clearDrag}
+          onEntryDragStart={(entry, selection) => beginDrag("right", entry, selection)}
+          onEntryDrop={(target, copy) => {
+            void drop("right", target, copy);
+          }}
+          onPaneDrop={(copy) => {
+            void drop("right", null, copy);
+          }}
           paneRef={rightPaneRef}
           refreshToken={refreshToken}
         />
       </div>
-      {clipboardNotice ? (
-        <div className="clipboard-notice" role="status">
-          {clipboardNotice}
+      {desktopMenu.failed ? (
+        <div role="alert" className="navigation-error">
+          {t("menu.error")}
         </div>
       ) : null}
+      <BottomFeedback
+        jobs={jobs}
+        logStatus={logStatus}
+        connectionFailed={connectionFailed}
+        notice={clipboardNotice}
+        onDismissNotice={() => setClipboardNotice(null)}
+        onCancel={cancelJob}
+        onReviewConflict={setConflictJob}
+        onLog={openLog}
+        onDiagnostics={openDiagnostics}
+      />
+      {logView && (
+        <OperationLogDialog
+          data={logView.data}
+          operationId={logView.operationId}
+          onClose={() => setLogView(null)}
+          onDiagnostics={openDiagnostics}
+        />
+      )}
+
       {interruptedTasks ? (
         <div className="restart-warning" role="alert">
           <span>{t("task.restartWarning")}</span>
@@ -1228,20 +1511,17 @@ function App({
           ))}
         </section>
       ) : null}
-      {taskDrawerOpen ? (
-        <TaskDrawer
-          jobs={jobs}
-          onCancel={cancelJob}
-          onClose={() => setTaskDrawerOpen(false)}
-          onReviewConflict={setConflictJob}
-        />
-      ) : null}
-      {conflictJob ? (
+      {visibleConflict ? (
         <ConflictDialog
-          job={conflictJob}
-          onClose={() => setConflictJob(null)}
+          key={visibleConflict.jobId}
+          job={visibleConflict}
+          busy={operationBusy}
+          onClose={() => {
+            setDeferredConflicts((current) => new Set(current).add(visibleConflict.jobId));
+            setConflictJob(null);
+          }}
           onResolve={(decision, applyToRemaining) =>
-            resolveConflict(conflictJob, decision, applyToRemaining)
+            resolveConflict(visibleConflict, decision, applyToRemaining)
           }
         />
       ) : null}
@@ -1363,7 +1643,7 @@ function App({
               <p>
                 {t("operation.trashDescription").replace(
                   "{count}",
-                  String(commandDialog.entries.length),
+                  String(commandDialog.context.entries.length),
                 )}
               </p>
             ) : (
@@ -1389,51 +1669,27 @@ function App({
         </div>
       ) : null}
       {contextMenu ? (
-        <div
-          className="context-menu"
-          onMouseLeave={() => setContextMenu(null)}
-          role="menu"
-          style={{ left: contextMenu.x, top: contextMenu.y }}
-        >
-          <button
-            disabled={!hasTransferTarget || operationBusy}
-            onClick={() => transfer("copy", [contextMenu.entry])}
-            role="menuitem"
-            title={!hasTransferTarget ? t("operation.disabled.destination") : undefined}
-            type="button"
-          >
-            {t("operation.copy")}
-          </button>
-          <button
-            disabled={!hasTransferTarget || operationBusy}
-            onClick={() => transfer("move", [contextMenu.entry])}
-            role="menuitem"
-            title={!hasTransferTarget ? t("operation.disabled.destination") : undefined}
-            type="button"
-          >
-            {t("operation.move")}
-          </button>
-          <button
-            onClick={() => void setClipboard("copy", [contextMenu.entry])}
-            role="menuitem"
-            type="button"
-          >
-            {t("operation.copyClipboard")}
-          </button>
-          <button
-            onClick={() => void setClipboard("cut", [contextMenu.entry])}
-            role="menuitem"
-            type="button"
-          >
-            {t("operation.cut")}
-          </button>
-          <button onClick={() => openRename([contextMenu.entry])} role="menuitem" type="button">
-            {t("operation.rename")}
-          </button>
-          <button onClick={() => openTrash([contextMenu.entry])} role="menuitem" type="button">
-            {t("operation.trash")}
-          </button>
-        </div>
+        <FileContextMenu
+          key={contextMenu.id}
+          menu={contextMenu}
+          client={contextMenuClient}
+          busy={operationBusy}
+          showHidden={paneHidden[contextMenu.context.pane]}
+          onClose={() => setContextMenu(null)}
+          onChoose={(command: ContextCommand) => {
+            const menu = contextMenu;
+            setContextMenu(null);
+            const controls = browseControls.current[menu.context.pane];
+            if (command === "open") controls?.open(menu.context.entries[0]);
+            else if (command === "toggleFolder")
+              controls?.folder(menu.context.entries[0], !menu.expanded);
+            else if (command === "refresh") controls?.refresh();
+            else if (command === "toggleHidden") controls?.toggleHidden();
+            else if (command === "operationLog") openLog();
+            else if (command === "diagnostics") openDiagnostics();
+            else dispatchCommand(command, menu.context);
+          }}
+        />
       ) : null}
     </main>
   );

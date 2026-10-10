@@ -11,9 +11,11 @@ export type BrowseErrorCode =
   | "notDirectory"
   | "staleReference"
   | "cancelled"
-  | "io";
+  | "io"
+  | "resourceLimit";
 
 export interface DirectoryListing {
+  treeKey?: string;
   directory: DirectoryReference;
   displayPath: string;
   canGoUp: boolean;
@@ -29,6 +31,13 @@ export interface BrowseOptions {
 }
 
 export interface DirectoryClient {
+  holdTreeNode?(
+    pane: PaneId,
+    nodeId: string,
+    target: { directory?: DirectoryReference; entry?: EntryReference },
+  ): Promise<void>;
+  readTreeNode?(nodeId: string, options: BrowseOptions): Promise<DirectoryListing>;
+  releaseTreeNode?(pane: PaneId, nodeId: string): Promise<void>;
   openPath(path: string, options: BrowseOptions): Promise<DirectoryListing>;
   openChild(entry: EntryReference, options: BrowseOptions): Promise<DirectoryListing>;
   openParent(directory: DirectoryReference, options: BrowseOptions): Promise<DirectoryListing>;
@@ -36,6 +45,10 @@ export interface DirectoryClient {
 }
 
 export const tauriDirectoryClient: DirectoryClient = {
+  holdTreeNode: (pane, nodeId, target) =>
+    invoke("hold_tree_node", { request: { pane, nodeId, ...target } }),
+  readTreeNode: (nodeId, options) => invoke("read_tree_node", { request: { nodeId, ...options } }),
+  releaseTreeNode: (pane, nodeId) => invoke("release_tree_node", { request: { pane, nodeId } }),
   openPath: (path, options) => invoke("open_directory", { request: { ...options, path } }),
   openChild: (entry, options) => invoke("open_child_directory", { request: { ...options, entry } }),
   openParent: (directory, options) =>

@@ -60,7 +60,16 @@ pub struct CopyProgress {
     pub total_bytes: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransferPhase {
+    Preparing,
+    Copying,
+    Verifying,
+    CleaningSource,
+}
+
 pub trait CopyProgressObserver {
+    fn on_phase(&mut self, _phase: TransferPhase) {}
     fn on_progress(&mut self, progress: CopyProgress);
 }
 
@@ -117,6 +126,7 @@ impl CopyExecutor {
         C: CopyCancellation,
         O: CopyProgressObserver,
     {
+        observer.on_phase(TransferPhase::Preparing);
         if plan.kind() != OperationKind::Copy || plan.sources().len() != plan.targets().len() {
             return failed_for_all(plan.sources().len(), CopyErrorCode::InvalidPlan);
         }
@@ -152,6 +162,7 @@ impl CopyExecutor {
                 continue;
             };
             let staging = staging_path(parent);
+            observer.on_phase(TransferPhase::Copying);
             let result = copy_to_staging(
                 source.native_path().as_path(),
                 &staging,
@@ -161,7 +172,10 @@ impl CopyExecutor {
                 &mut bytes_copied,
                 total_bytes,
             )
-            .and_then(|()| commit_staging(&staging, target_path));
+            .and_then(|()| {
+                observer.on_phase(TransferPhase::Verifying);
+                commit_staging(&staging, target_path)
+            });
 
             match result {
                 Ok(()) => items.push(CopyItemResult {

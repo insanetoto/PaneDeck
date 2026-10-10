@@ -2,7 +2,7 @@
 
 PaneDeck 是一个面向 macOS 的双窗格文件整理工具。它希望让移动、复制、重命名、删除与批量整理变得更快，同时通过任务队列和冲突预检降低误操作成本。
 
-项目已完成 MVP：工程质量门、核心模块边界、双语框架、双窗格导航与虚拟列表、外部变化同步、本地位置与收藏、文件操作预检和任务队列，以及安全复制、移动、剪切/粘贴、重命名、新建文件夹、系统废纸篓、统一冲突决策、任务抽屉、双窗格拖放、主动诊断导出与崩溃恢复提示。
+项目已完成 MVP：工程质量门、核心模块边界、双语框架、双窗格导航与虚拟列表、外部变化同步、本地位置与收藏、文件操作预检和任务队列，以及安全复制、移动、剪切/粘贴、重命名、新建文件夹、系统废纸篓、统一冲突决策、双窗格拖放、主动诊断导出与崩溃恢复提示。
 
 ## 当前产品定义
 
@@ -17,6 +17,7 @@ PaneDeck 是一个面向 macOS 的双窗格文件整理工具。它希望让移�
 
 完整规划见 [docs/product-plan.md](docs/product-plan.md)。
 开发任务见 [docs/tasks.md](docs/tasks.md)。
+v2 交互优化规划见 [docs/product-plan-v2.md](docs/product-plan-v2.md)，研发任务见 [docs/tasks-v2.md](docs/tasks-v2.md)。v2 已完成 PD-100～PD-102（命令契约、操作来源路由、macOS 菜单栏）、PD-110～PD-113（访达式展开目录树、树选择与外部变化同步）及 PD-120 → PD-103 → PD-121（原生上下文菜单、顶栏和活动标识移除、同窗格/跨窗格拖放）。PD-130～PD-133 已完成持久操作日志、真实阶段事件、底部进度和异常提示，并移除右侧任务抽屉。PD-140～PD-141 的完整性能、可访问性与版本验收仍待实施。验收证据见 [docs/v2-acceptance.md](docs/v2-acceptance.md)。
 多人协作时使用 [docs/collaboration-prompt.md](docs/collaboration-prompt.md) 中的 GitHub 领取约定与可复制提示词。
 首次参与开发请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 的完整协作步骤。
 品牌图标的设计语义与使用边界见 [branding/README.md](branding/README.md)。

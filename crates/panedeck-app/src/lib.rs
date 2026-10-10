@@ -5,22 +5,36 @@
 
 mod browser;
 mod clipboard;
+mod context_menu;
+mod desktop_menu;
+pub use context_menu::{
+    ContextCommandDto, ContextMenuEventDto, ContextMenuItemDto, ContextMenuKindDto,
+    ContextMenuRequestDto,
+};
 mod diagnostics;
 mod locations;
+mod operation_log;
 mod operations;
+pub use operation_log::{
+    ItemErrorDto, LogStatusDto, OperationLog, OperationLogEventDto, OperationLogSnapshotDto,
+};
 mod path_ipc;
 mod recovery;
 
 pub use browser::{
     BrowseErrorCode, BrowseErrorDto, BrowserService, DirectoryListingDto, DirectoryWatchEventDto,
-    DirectoryWatchReasonDto, NavigateChildRequestDto, NavigateDirectoryRequestDto,
-    NavigateKnownRequestDto, PaneIdDto, SortDirectionDto, SortFieldDto,
-    StopDirectoryWatchRequestDto, WatchDirectoryRequestDto,
+    DirectoryWatchReasonDto, HoldTreeNodeRequestDto, NavigateChildRequestDto,
+    NavigateDirectoryRequestDto, NavigateKnownRequestDto, PaneIdDto, ReadTreeNodeRequestDto,
+    SortDirectionDto, SortFieldDto, StopDirectoryWatchRequestDto, TreeNodeRequestDto,
+    WatchDirectoryRequestDto,
 };
 pub use clipboard::{
     ClipboardErrorCode, ClipboardErrorDto, ClipboardIntentDto, ClipboardService, ClipboardStateDto,
     ConfirmedPasteDto, PasteDraftDto, PasteDraftRequestDto, PasteItemCompletion,
     PreparePasteRequestDto, SetClipboardRequestDto,
+};
+pub use desktop_menu::{
+    DesktopCommandDto, DesktopLanguageDto, DesktopMenuEventDto, DesktopMenuSnapshotDto,
 };
 pub use diagnostics::{DiagnosticExportRequestDto, DiagnosticPreviewDto, DiagnosticService};
 
@@ -31,8 +45,9 @@ pub use operations::{
     CancelOperationRequestDto, ConflictDecisionDto, ConflictEntryDto, ConflictKindDto,
     CreateDirectoryRequestDto, OperationConflictDto, OperationErrorCode, OperationErrorDto,
     OperationItemOutcomeDto, OperationJobDto, OperationJobStateDto, OperationKindDto,
-    OperationResultDto, OperationService, RenameRequestDto, ResolveConflictRequestDto,
-    TransferDestinationDto, TransferRequestDto, TrashRequestDto,
+    OperationPhaseDto, OperationResultDto, OperationService, OperationSnapshotDto,
+    RenameRequestDto, ResolveConflictRequestDto, TransferDestinationDto, TransferRequestDto,
+    TrashRequestDto,
 };
 pub use recovery::{CleanupRecoveryRequestDto, RecoveryError, RecoveryItemDto, RecoveryService};
 
@@ -63,7 +78,10 @@ impl AppServices {
     #[must_use]
     pub fn with_data_directory(directory: std::path::PathBuf) -> Self {
         let recovery = RecoveryService::new(directory.join("operation-journal.jsonl"));
-        let operations = OperationService::with_recovery(recovery.clone());
+        let operations = OperationService::with_logs(
+            recovery.clone(),
+            OperationLog::new(directory.join("operations.jsonl")),
+        );
         Self {
             operations,
             recovery,

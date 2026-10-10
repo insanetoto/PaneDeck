@@ -9,7 +9,7 @@ use std::{
         Arc, Mutex,
     },
     thread,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use panedeck_fs::{
@@ -73,7 +73,7 @@ pub struct TrashRequestDto {
     pub entries: Vec<EntryReferenceDto>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum OperationItemOutcomeDto {
     Succeeded,
@@ -93,7 +93,7 @@ pub struct OperationResultDto {
     pub item_outcomes: Vec<OperationItemOutcomeDto>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum OperationJobStateDto {
     Queued,
@@ -107,10 +107,51 @@ pub enum OperationJobStateDto {
     Cancelled,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OperationPhaseDto {
+    Preparing,
+    Copying,
+    Verifying,
+    CleaningSource,
+    Finished,
+}
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationSnapshotDto {
+    pub sequence: u64,
+    pub jobs: Vec<OperationJobDto>,
+    pub log_status: crate::LogStatusDto,
+    pub recovery_log_status: crate::LogStatusDto,
+}
+type Watcher = Arc<dyn Fn(OperationSnapshotDto) + Send + Sync>;
+struct EventHub {
+    sequence: u64,
+    next_watch: u64,
+    watchers: BTreeMap<u64, Watcher>,
+    throttle: panedeck_jobs::FrontendEventThrottle,
+}
+impl Default for EventHub {
+    fn default() -> Self {
+        Self {
+            sequence: 0,
+            next_watch: 1,
+            watchers: BTreeMap::new(),
+            throttle: panedeck_jobs::FrontendEventThrottle::new(Duration::from_millis(50)),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OperationJobDto {
     pub job_id: u64,
+    pub operation_id: String,
+    pub operation_item_count: usize,
+    pub operation_state: Option<OperationJobStateDto>,
+    pub operation_outcomes: Option<Vec<OperationItemOutcomeDto>>,
+    pub phase: OperationPhaseDto,
+    pub item_errors: Vec<crate::ItemErrorDto>,
     pub kind: OperationKindDto,
     pub state: OperationJobStateDto,
     pub item_count: usize,
@@ -207,7 +248,28 @@ impl fmt::Display for OperationErrorDto {
 
 impl std::error::Error for OperationErrorDto {}
 
-type Completion = Box<dyn FnOnce(&[OperationItemOutcomeDto]) + Send>;
+type CompletionCallback = Box<dyn FnOnce(&[OperationItemOutcomeDto]) + Send>;
+
+struct Completion {
+    operation_id: String,
+    item_count: usize,
+    callback: CompletionCallback,
+}
+impl Completion {
+    fn run(self, outcomes: &[OperationItemOutcomeDto]) {
+        (self.callback)(outcomes);
+    }
+    fn wrap<F>(self, callback: F) -> Self
+    where
+        F: FnOnce(&[OperationItemOutcomeDto], Completion) + Send + 'static,
+    {
+        Self {
+            operation_id: self.operation_id.clone(),
+            item_count: self.item_count,
+            callback: Box::new(move |outcomes| callback(outcomes, self)),
+        }
+    }
+}
 
 struct PendingConflict {
     request: OperationRequest,
@@ -219,6 +281,10 @@ struct PendingConflict {
 
 struct OperationRecord {
     id: JobId,
+    operation_id: String,
+    operation_item_count: usize,
+    item_errors: Vec<crate::ItemErrorDto>,
+    phase: OperationPhaseDto,
     kind: OperationKindDto,
     state: OperationJobStateDto,
     item_count: usize,
@@ -239,6 +305,9 @@ struct OperationInner {
     cancellations: Mutex<BTreeMap<u64, Arc<panedeck_fs::AtomicCancellation>>>,
     completions: Mutex<BTreeMap<u64, Completion>>,
     recovery: RecoveryService,
+    log: crate::OperationLog,
+    hub: Mutex<EventHub>,
+    pump_started: std::sync::atomic::AtomicBool,
     next_pending_id: AtomicU64,
     pending_conflicts: Mutex<BTreeMap<u64, PendingConflict>>,
     external_jobs: Mutex<BTreeMap<u64, OperationJobDto>>,
@@ -261,6 +330,9 @@ impl Default for OperationService {
                 cancellations: Mutex::new(BTreeMap::new()),
                 completions: Mutex::new(BTreeMap::new()),
                 recovery: RecoveryService::default(),
+                log: crate::OperationLog::default(),
+                hub: Mutex::new(EventHub::default()),
+                pump_started: std::sync::atomic::AtomicBool::new(false),
                 next_pending_id: AtomicU64::new(1_000_000_000),
                 pending_conflicts: Mutex::new(BTreeMap::new()),
                 external_jobs: Mutex::new(BTreeMap::new()),
@@ -272,6 +344,12 @@ impl Default for OperationService {
 impl OperationService {
     #[must_use]
     pub fn with_recovery(recovery: RecoveryService) -> Self {
+        Self::with_logs(recovery, crate::OperationLog::default())
+    }
+    pub fn log(&self) -> &crate::OperationLog {
+        &self.inner.log
+    }
+    pub fn with_logs(recovery: RecoveryService, log: crate::OperationLog) -> Self {
         Self {
             inner: Arc::new(OperationInner {
                 execution_lock: Mutex::new(()),
@@ -282,6 +360,9 @@ impl OperationService {
                 cancellations: Mutex::new(BTreeMap::new()),
                 completions: Mutex::new(BTreeMap::new()),
                 recovery,
+                log,
+                hub: Mutex::new(EventHub::default()),
+                pump_started: std::sync::atomic::AtomicBool::new(false),
                 next_pending_id: AtomicU64::new(1_000_000_000),
                 pending_conflicts: Mutex::new(BTreeMap::new()),
                 external_jobs: Mutex::new(BTreeMap::new()),
@@ -289,11 +370,76 @@ impl OperationService {
         }
     }
 
+    pub fn watch<F>(&self, callback: F) -> (u64, OperationSnapshotDto)
+    where
+        F: Fn(OperationSnapshotDto) + Send + Sync + 'static,
+    {
+        let mut hub = self
+            .inner
+            .hub
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let id = hub.next_watch;
+        hub.next_watch += 1;
+        hub.watchers.insert(id, Arc::new(callback));
+        let snapshot = self.state_snapshot(hub.sequence);
+        drop(hub);
+        if !self.inner.pump_started.swap(true, Ordering::AcqRel) {
+            let weak = Arc::downgrade(&self.inner);
+            thread::spawn(move || loop {
+                let Some(inner) = weak.upgrade() else {
+                    break;
+                };
+                publish(&inner, false);
+                drop(inner);
+                thread::sleep(Duration::from_millis(50));
+            });
+        }
+        (id, snapshot)
+    }
+    pub fn unwatch(&self, id: u64) {
+        self.inner
+            .hub
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .watchers
+            .remove(&id);
+    }
+    fn state_snapshot(&self, sequence: u64) -> OperationSnapshotDto {
+        OperationSnapshotDto {
+            sequence,
+            jobs: self.jobs(),
+            log_status: self.inner.log.status(),
+            recovery_log_status: self.inner.recovery.log_status(),
+        }
+    }
+
+    /// Read-only drag feedback: no jobs, journaling, recursive sizing or mutations.
+    pub fn validate_transfer(
+        &self,
+        browser: &BrowserService,
+        request: TransferRequestDto,
+    ) -> Result<(), OperationErrorDto> {
+        self.resolve_transfer(browser, request).map(|_| ())
+    }
+
     pub fn transfer(
         &self,
         browser: &BrowserService,
         request: TransferRequestDto,
     ) -> Result<OperationJobDto, OperationErrorDto> {
+        self.logged_request(
+            request.kind,
+            || self.resolve_transfer(browser, request),
+            Box::new(|_| {}),
+        )
+    }
+
+    fn resolve_transfer(
+        &self,
+        browser: &BrowserService,
+        request: TransferRequestDto,
+    ) -> Result<OperationRequest, OperationErrorDto> {
         if !matches!(
             request.kind,
             OperationKindDto::Copy | OperationKindDto::Move
@@ -301,7 +447,7 @@ impl OperationService {
             return Err(error(OperationErrorCode::Unsupported));
         }
         let sources = browser
-            .resolve_entries(request.entries)
+            .resolve_selection(request.entries)
             .map_err(map_browse_error)?;
         let destination = match request.destination {
             TransferDestinationDto::Directory { directory } => browser
@@ -314,6 +460,11 @@ impl OperationService {
                 .next()
                 .ok_or_else(|| error(OperationErrorCode::StaleReference))?,
         };
+        // Resolve aliases on the native side so both feedback and execution use the same directory.
+        let destination = panedeck_domain::NativePath::new(
+            fs::canonicalize(destination.as_path())
+                .map_err(|_| error(OperationErrorCode::StaleReference))?,
+        );
         let operation = match request.kind {
             OperationKindDto::Copy => OperationRequest::Copy {
                 sources,
@@ -325,7 +476,8 @@ impl OperationService {
             },
             _ => unreachable!("validated transfer kind"),
         };
-        self.submit(operation)
+        validate_transfer_paths(&operation)?;
+        Ok(operation)
     }
 
     pub fn rename(
@@ -333,16 +485,22 @@ impl OperationService {
         browser: &BrowserService,
         request: RenameRequestDto,
     ) -> Result<OperationJobDto, OperationErrorDto> {
-        let source = browser
-            .resolve_entries(vec![request.entry])
-            .map_err(map_browse_error)?
-            .into_iter()
-            .next()
-            .ok_or_else(|| error(OperationErrorCode::EmptySelection))?;
-        self.submit(OperationRequest::Rename {
-            source,
-            new_name: OsString::from(request.new_name),
-        })
+        self.logged_request(
+            OperationKindDto::Rename,
+            || {
+                let source = browser
+                    .resolve_entries(vec![request.entry])
+                    .map_err(map_browse_error)?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| error(OperationErrorCode::EmptySelection))?;
+                Ok(OperationRequest::Rename {
+                    source,
+                    new_name: OsString::from(request.new_name),
+                })
+            },
+            Box::new(|_| {}),
+        )
     }
 
     pub fn create_directory(
@@ -350,13 +508,19 @@ impl OperationService {
         browser: &BrowserService,
         request: CreateDirectoryRequestDto,
     ) -> Result<OperationJobDto, OperationErrorDto> {
-        let parent = browser
-            .resolve_directory(request.directory)
-            .map_err(map_browse_error)?;
-        self.submit(OperationRequest::CreateDirectory {
-            parent,
-            name: OsString::from(request.name),
-        })
+        self.logged_request(
+            OperationKindDto::CreateDirectory,
+            || {
+                let parent = browser
+                    .resolve_directory(request.directory)
+                    .map_err(map_browse_error)?;
+                Ok(OperationRequest::CreateDirectory {
+                    parent,
+                    name: OsString::from(request.name),
+                })
+            },
+            Box::new(|_| {}),
+        )
     }
 
     pub fn trash(
@@ -364,10 +528,16 @@ impl OperationService {
         browser: &BrowserService,
         request: TrashRequestDto,
     ) -> Result<OperationJobDto, OperationErrorDto> {
-        let sources = browser
-            .resolve_entries(request.entries)
-            .map_err(map_browse_error)?;
-        self.submit(OperationRequest::Trash { sources })
+        self.logged_request(
+            OperationKindDto::Trash,
+            || {
+                let sources = browser
+                    .resolve_selection(request.entries)
+                    .map_err(map_browse_error)?;
+                Ok(OperationRequest::Trash { sources })
+            },
+            Box::new(|_| {}),
+        )
     }
 
     pub fn submit(&self, request: OperationRequest) -> Result<OperationJobDto, OperationErrorDto> {
@@ -382,7 +552,68 @@ impl OperationService {
     where
         F: FnOnce(&[OperationItemOutcomeDto]) + Send + 'static,
     {
-        self.submit_boxed(request, Box::new(completion))
+        let kind = request_kind(&request);
+        self.logged_request(kind, || Ok(request), Box::new(completion))
+    }
+
+    fn logged_request<F>(
+        &self,
+        kind: OperationKindDto,
+        resolve: F,
+        callback: CompletionCallback,
+    ) -> Result<OperationJobDto, OperationErrorDto>
+    where
+        F: FnOnce() -> Result<OperationRequest, OperationErrorDto>,
+    {
+        let id = self.inner.log.begin(kind);
+        let request = match resolve() {
+            Ok(request) => request,
+            Err(error) => {
+                self.reject(&id, kind, error);
+                publish(&self.inner, true);
+                return Err(error);
+            }
+        };
+        let log = self.inner.log.clone();
+        let final_id = id.clone();
+        let completion = Completion {
+            operation_id: id.clone(),
+            item_count: request_item_count(&request),
+            callback: Box::new(move |outcomes| {
+                callback(outcomes);
+                log.record(
+                    &final_id,
+                    None,
+                    kind,
+                    "finished",
+                    Some(outcome_state(outcomes)),
+                    outcomes,
+                    &[],
+                );
+            }),
+        };
+        let result = self.submit_boxed(request, completion).inspect_err(|error| {
+            if self.inner.log.result(&id).is_none() {
+                self.reject(&id, kind, *error);
+            }
+        });
+        publish(&self.inner, true);
+        result
+    }
+    fn reject(&self, id: &str, kind: OperationKindDto, error: OperationErrorDto) {
+        self.inner.log.record(
+            id,
+            None,
+            kind,
+            "rejected",
+            Some(OperationJobStateDto::Failed),
+            &[],
+            &[crate::ItemErrorDto {
+                index: None,
+                domain: "operation".into(),
+                code: format!("{:?}", error.code),
+            }],
+        );
     }
 
     fn submit_boxed(
@@ -397,7 +628,13 @@ impl OperationService {
                 if let PlanValidationErrorKind::Conflict { target_index } = value.kind() {
                     return self.create_pending_conflict(request, *target_index, completion);
                 }
-                return Err(error(map_plan_error(value.kind())));
+                let failure = error(map_plan_error(value.kind()));
+                self.reject(&completion.operation_id, request_kind(&request), failure);
+                completion.run(&vec![
+                    OperationItemOutcomeDto::Failed;
+                    request_item_count(&request)
+                ]);
+                return Err(failure);
             }
         };
         let kind = map_operation_kind(plan.kind());
@@ -420,6 +657,10 @@ impl OperationService {
                 job_id.get(),
                 OperationRecord {
                     id: job_id,
+                    operation_id: completion.operation_id.clone(),
+                    operation_item_count: completion.item_count,
+                    item_errors: Vec::new(),
+                    phase: OperationPhaseDto::Preparing,
                     kind,
                     state: OperationJobStateDto::Queued,
                     item_count,
@@ -433,6 +674,15 @@ impl OperationService {
                     destination_directories: destination_directories.clone(),
                 },
             );
+        self.inner.log.record(
+            &completion.operation_id,
+            Some(job_id.get()),
+            kind,
+            "queued",
+            Some(OperationJobStateDto::Queued),
+            &[],
+            &[],
+        );
         self.inner.recovery.record(
             job_id.get(),
             kind_name(kind),
@@ -454,6 +704,7 @@ impl OperationService {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(job_id.get(), completion);
+        publish(&self.inner, true);
         let inner = Arc::clone(&self.inner);
         thread::spawn(move || run_next(inner));
         self.job(job_id.get())
@@ -476,26 +727,19 @@ impl OperationService {
                 .values()
                 .cloned(),
         );
+        for job in &mut jobs {
+            if let Some((state, outcomes)) = self.inner.log.result(&job.operation_id) {
+                job.operation_state = Some(state);
+                job.operation_outcomes = Some(outcomes);
+            }
+        }
         jobs.sort_by_key(|job| std::cmp::Reverse(job.job_id));
         jobs
     }
 
     #[must_use]
     pub fn job(&self, job_id: u64) -> Option<OperationJobDto> {
-        self.inner
-            .records
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&job_id)
-            .map(snapshot)
-            .or_else(|| {
-                self.inner
-                    .external_jobs
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .get(&job_id)
-                    .cloned()
-            })
+        self.jobs().into_iter().find(|job| job.job_id == job_id)
     }
 
     fn create_pending_conflict(
@@ -522,6 +766,12 @@ impl OperationService {
         let kind_dto = map_operation_kind(kind);
         let job = OperationJobDto {
             job_id,
+            operation_id: completion.operation_id.clone(),
+            operation_item_count: completion.item_count,
+            operation_state: None,
+            operation_outcomes: None,
+            phase: OperationPhaseDto::Preparing,
+            item_errors: Vec::new(),
             kind: kind_dto,
             state: OperationJobStateDto::AwaitingDecision,
             item_count,
@@ -535,6 +785,15 @@ impl OperationService {
             can_cancel: true,
             conflict: Some(conflict_dto),
         };
+        self.inner.log.record(
+            &completion.operation_id,
+            Some(job_id),
+            kind_dto,
+            "conflict",
+            Some(OperationJobStateDto::AwaitingDecision),
+            &[],
+            &[],
+        );
         let (journal_sources, journal_destinations) = journal_paths(&request);
         self.inner
             .pending_conflicts
@@ -563,10 +822,19 @@ impl OperationService {
             &journal_sources,
             &journal_destinations,
         );
+        publish(&self.inner, true);
         Ok(job)
     }
 
     pub fn resolve_conflict(
+        &self,
+        request: ResolveConflictRequestDto,
+    ) -> Result<OperationJobDto, OperationErrorDto> {
+        let result = self.resolve_conflict_inner(request);
+        publish(&self.inner, true);
+        result
+    }
+    fn resolve_conflict_inner(
         &self,
         request: ResolveConflictRequestDto,
     ) -> Result<OperationJobDto, OperationErrorDto> {
@@ -577,6 +845,15 @@ impl OperationService {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&request.job_id)
             .ok_or_else(|| error(OperationErrorCode::StaleReference))?;
+        self.inner.log.record(
+            &pending.completion.operation_id,
+            Some(request.job_id),
+            map_operation_kind(pending.session.operation()),
+            "decision",
+            None,
+            &[],
+            &[],
+        );
         let decision = match request.decision {
             ConflictDecisionDto::Skip => ConflictDecision::Skip,
             ConflictDecisionDto::Replace => ConflictDecision::Replace,
@@ -657,14 +934,20 @@ impl OperationService {
                         self.continuation_completion(None, pending.completion, outcomes, preferred);
                     self.submit_followup(remaining, completion, preferred)
                 } else {
-                    (pending.completion)(&outcomes);
+                    pending.completion.run(&outcomes);
                     self.finish_external(request.job_id, OperationJobStateDto::Completed, outcomes)
                 }
             }
             ConflictResolution::Cancelled => {
                 self.record_pending_state(request.job_id, &pending, "cancelled", "cancelled");
-                let outcomes = vec![OperationItemOutcomeDto::Cancelled];
-                (pending.completion)(&outcomes);
+                let outcomes = vec![
+                    OperationItemOutcomeDto::Cancelled;
+                    1 + pending
+                        .remaining_request
+                        .as_ref()
+                        .map_or(0, request_item_count)
+                ];
+                pending.completion.run(&outcomes);
                 self.finish_external(request.job_id, OperationJobStateDto::Cancelled, outcomes)
             }
         }
@@ -696,6 +979,16 @@ impl OperationService {
             .count();
         job.failed_items = outcomes.len().saturating_sub(job.completed_items);
         job.item_outcomes = outcomes;
+        self.inner.log.record(
+            &job.operation_id,
+            Some(job_id),
+            job.kind,
+            "jobFinished",
+            Some(state),
+            &job.item_outcomes,
+            &job.item_errors,
+        );
+        job.phase = OperationPhaseDto::Finished;
         job.can_cancel = false;
         job.conflict = None;
         Ok(job.clone())
@@ -762,7 +1055,7 @@ impl OperationService {
                             source,
                             panedeck_domain::NativePath::new(original_target.clone()),
                         ),
-                        Box::new(move |outcomes| {
+                        completion.wrap(move |outcomes, completion| {
                             let succeeded = outcomes
                                 .iter()
                                 .all(|outcome| *outcome == OperationItemOutcomeDto::Succeeded);
@@ -771,7 +1064,7 @@ impl OperationService {
                             } else if fs::symlink_metadata(&target_for_restore).is_err() {
                                 let _ = fs::rename(&backup_for_completion, &target_for_restore);
                             }
-                            completion(outcomes);
+                            completion.run(outcomes);
                         }),
                     )
                     .inspect_err(|_| {
@@ -796,7 +1089,7 @@ impl OperationService {
                         let _ = fs::remove_dir(source.as_path());
                     }
                     let outcomes = vec![OperationItemOutcomeDto::Succeeded];
-                    completion(&outcomes);
+                    completion.run(&outcomes);
                     mark_decision_applied();
                     return self.finish_external(
                         pending_job_id,
@@ -818,7 +1111,7 @@ impl OperationService {
                 let source_directory = source.as_path().to_owned();
                 let result = self.submit_followup(
                     merged_request,
-                    Box::new(move |outcomes| {
+                    completion.wrap(move |outcomes, completion| {
                         if kind != OperationKind::Copy
                             && outcomes.iter().all(|outcome| {
                                 matches!(
@@ -830,7 +1123,7 @@ impl OperationService {
                         {
                             let _ = fs::remove_dir(&source_directory);
                         }
-                        completion(outcomes);
+                        completion.run(outcomes);
                     }),
                     preferred,
                 );
@@ -896,23 +1189,36 @@ impl OperationService {
         preferred: Option<ConflictDecisionDto>,
     ) -> Completion {
         let service = self.clone();
-        Box::new(move |outcomes| {
+        completion.wrap(move |outcomes, completion| {
             prefix.extend_from_slice(outcomes);
             if let Some(remaining) = remaining {
+                if outcomes.contains(&OperationItemOutcomeDto::Cancelled) {
+                    prefix.extend(vec![
+                        OperationItemOutcomeDto::Cancelled;
+                        request_item_count(&remaining)
+                    ]);
+                    completion.run(&prefix);
+                    return;
+                }
                 let collected = prefix;
-                let final_completion: Completion = Box::new(move |remaining_outcomes| {
+                let final_completion = completion.wrap(move |remaining_outcomes, completion| {
                     let mut combined = collected;
                     combined.extend_from_slice(remaining_outcomes);
-                    completion(&combined);
+                    completion.run(&combined);
                 });
                 let _ = service.submit_followup(remaining, final_completion, preferred);
             } else {
-                completion(&prefix);
+                completion.run(&prefix);
             }
         })
     }
 
     pub fn cancel(&self, job_id: u64) -> Result<OperationJobDto, OperationErrorDto> {
+        let result = self.cancel_inner(job_id);
+        publish(&self.inner, true);
+        result
+    }
+    fn cancel_inner(&self, job_id: u64) -> Result<OperationJobDto, OperationErrorDto> {
         if let Some(pending) = self
             .inner
             .pending_conflicts
@@ -921,8 +1227,14 @@ impl OperationService {
             .remove(&job_id)
         {
             self.record_pending_state(job_id, &pending, "cancelled", "cancelled");
-            let outcomes = vec![OperationItemOutcomeDto::Cancelled];
-            (pending.completion)(&outcomes);
+            let outcomes = vec![
+                OperationItemOutcomeDto::Cancelled;
+                1 + pending
+                    .remaining_request
+                    .as_ref()
+                    .map_or(0, request_item_count)
+            ];
+            pending.completion.run(&outcomes);
             let mut jobs = self
                 .inner
                 .external_jobs
@@ -933,7 +1245,17 @@ impl OperationService {
                 .ok_or_else(|| error(OperationErrorCode::StaleReference))?;
             job.state = OperationJobStateDto::Cancelled;
             job.item_outcomes = outcomes;
-            job.failed_items = 1;
+            self.inner.log.record(
+                &job.operation_id,
+                Some(job_id),
+                job.kind,
+                "jobFinished",
+                Some(job.state),
+                &job.item_outcomes,
+                &job.item_errors,
+            );
+            job.failed_items = job.item_outcomes.len();
+            job.phase = OperationPhaseDto::Finished;
             job.can_cancel = false;
             return Ok(job.clone());
         }
@@ -946,6 +1268,9 @@ impl OperationService {
             let record = records
                 .get(&job_id)
                 .ok_or_else(|| error(OperationErrorCode::StaleReference))?;
+            if !snapshot(record).can_cancel {
+                return Err(error(OperationErrorCode::Unsupported));
+            }
             (record.id, record.item_count)
         };
         let was_queued = {
@@ -978,10 +1303,38 @@ impl OperationService {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let record = records.get_mut(&job_id).expect("record checked above");
         record.cancellation_requested = true;
+        record.state = OperationJobStateDto::CancellationRequested;
         if was_queued {
+            let outcomes = vec![OperationItemOutcomeDto::Cancelled; item_count];
+            drop(records);
+            let completion = self
+                .inner
+                .completions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&job_id);
+            if let Some(completion) = completion {
+                completion.run(&outcomes);
+            }
+            let mut records = self
+                .inner
+                .records
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let record = records.get_mut(&job_id).expect("cancelled queued record");
             record.state = OperationJobStateDto::Cancelled;
+            record.phase = OperationPhaseDto::Finished;
             record.finished_at = Some(Instant::now());
-            record.outcomes = vec![OperationItemOutcomeDto::Cancelled; item_count];
+            record.outcomes = outcomes;
+            self.inner.log.record(
+                &record.operation_id,
+                Some(job_id),
+                record.kind,
+                "jobFinished",
+                Some(record.state),
+                &record.outcomes,
+                &record.item_errors,
+            );
             self.inner.recovery.record(
                 job_id,
                 kind_name(record.kind),
@@ -990,17 +1343,8 @@ impl OperationService {
                 &record.source_paths,
                 &record.destination_directories,
             );
-            let completion = self
-                .inner
-                .completions
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remove(&job_id);
-            if let Some(completion) = completion {
-                completion(&record.outcomes);
-            }
+            Ok(snapshot(record))
         } else {
-            record.state = OperationJobStateDto::CancellationRequested;
             self.inner.recovery.record(
                 job_id,
                 kind_name(record.kind),
@@ -1009,8 +1353,8 @@ impl OperationService {
                 &record.source_paths,
                 &record.destination_directories,
             );
+            Ok(snapshot(record))
         }
-        Ok(snapshot(record))
     }
 }
 
@@ -1046,6 +1390,7 @@ fn run_next(inner: Arc<OperationInner>) {
             &record.destination_directories,
         );
     }
+    publish(&inner, true);
     let plan = inner
         .queue
         .lock()
@@ -1075,6 +1420,7 @@ fn run_next(inner: Arc<OperationInner>) {
             &record.destination_directories,
         );
     }
+    publish(&inner, true);
     let cancellation = inner
         .cancellations
         .lock()
@@ -1082,90 +1428,80 @@ fn run_next(inner: Arc<OperationInner>) {
         .get(&job_id.get())
         .cloned()
         .expect("job cancellation exists");
+    let mut item_errors = Vec::new();
     let outcomes = match plan.kind() {
         OperationKind::Copy => {
-            let mut observer = |progress: panedeck_fs::CopyProgress| {
-                let _ = inner
-                    .queue
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .report_progress(
-                        job_id,
-                        JobProgress::new(progress.bytes_copied, progress.total_bytes, 0)
-                            .expect("executor progress is bounded"),
-                    );
-                if let Some(record) = inner
-                    .records
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .get_mut(&job_id.get())
-                {
-                    record.progress =
-                        JobProgress::new(progress.bytes_copied, progress.total_bytes, 0).ok();
-                }
+            let mut observer = OperationObserver {
+                inner: &inner,
+                job_id,
             };
             CopyExecutor
                 .execute(&plan, &StandardPreflightProbe, &cancellation, &mut observer)
                 .items
                 .into_iter()
-                .map(|item| match item.outcome {
-                    CopyItemOutcome::Copied => OperationItemOutcomeDto::Succeeded,
-                    CopyItemOutcome::Failed(panedeck_fs::CopyErrorCode::Cancelled) => {
-                        OperationItemOutcomeDto::Cancelled
+                .map(|item| {
+                    if let CopyItemOutcome::Failed(code) = item.outcome {
+                        item_errors.push(item_error(item.source_index, "copy", code));
                     }
-                    CopyItemOutcome::Failed(_) => OperationItemOutcomeDto::Failed,
+                    match item.outcome {
+                        CopyItemOutcome::Copied => OperationItemOutcomeDto::Succeeded,
+                        CopyItemOutcome::Failed(panedeck_fs::CopyErrorCode::Cancelled) => {
+                            OperationItemOutcomeDto::Cancelled
+                        }
+                        CopyItemOutcome::Failed(_) => OperationItemOutcomeDto::Failed,
+                    }
                 })
                 .collect()
         }
         OperationKind::Move => {
-            let mut observer = |progress: panedeck_fs::CopyProgress| {
-                let _ = inner
-                    .queue
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .report_progress(
-                        job_id,
-                        JobProgress::new(progress.bytes_copied, progress.total_bytes, 0)
-                            .expect("executor progress is bounded"),
-                    );
-                if let Some(record) = inner
-                    .records
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .get_mut(&job_id.get())
-                {
-                    record.progress =
-                        JobProgress::new(progress.bytes_copied, progress.total_bytes, 0).ok();
-                }
+            let mut observer = OperationObserver {
+                inner: &inner,
+                job_id,
             };
             MoveExecutor
                 .execute(&plan, &StandardPreflightProbe, &cancellation, &mut observer)
                 .items
                 .into_iter()
-                .map(|item| match item.outcome {
-                    MoveItemOutcome::Moved => OperationItemOutcomeDto::Succeeded,
-                    MoveItemOutcome::Failed(panedeck_fs::MoveErrorCode::Cancelled) => {
-                        OperationItemOutcomeDto::Cancelled
+                .map(|item| {
+                    match item.outcome {
+                        MoveItemOutcome::Failed(code)
+                        | MoveItemOutcome::CopiedButSourceNotRemoved(code) => {
+                            item_errors.push(item_error(item.source_index, "move", code))
+                        }
+                        _ => {}
                     }
-                    MoveItemOutcome::CopiedButSourceNotRemoved(_) => {
-                        OperationItemOutcomeDto::CopiedButSourceNotRemoved
+                    match item.outcome {
+                        MoveItemOutcome::Moved => OperationItemOutcomeDto::Succeeded,
+                        MoveItemOutcome::Failed(panedeck_fs::MoveErrorCode::Cancelled) => {
+                            OperationItemOutcomeDto::Cancelled
+                        }
+                        MoveItemOutcome::CopiedButSourceNotRemoved(_) => {
+                            OperationItemOutcomeDto::CopiedButSourceNotRemoved
+                        }
+                        MoveItemOutcome::Failed(_) => OperationItemOutcomeDto::Failed,
                     }
-                    MoveItemOutcome::Failed(_) => OperationItemOutcomeDto::Failed,
                 })
                 .collect()
         }
-        OperationKind::Rename | OperationKind::CreateDirectory => vec![MutationExecutor
+        OperationKind::Rename | OperationKind::CreateDirectory => vec![match MutationExecutor
             .execute(&plan, &StandardPreflightProbe)
-            .map_or(OperationItemOutcomeDto::Failed, |_| {
-                OperationItemOutcomeDto::Succeeded
-            })],
+        {
+            Ok(()) => OperationItemOutcomeDto::Succeeded,
+            Err(code) => {
+                item_errors.push(item_error(0, "mutation", code));
+                OperationItemOutcomeDto::Failed
+            }
+        }],
         OperationKind::Trash => TrashExecutor
             .execute(&plan, &StandardPreflightProbe, &SystemTrashAdapter)
             .items
             .into_iter()
             .map(|item| match item.outcome {
                 TrashItemOutcome::Trashed => OperationItemOutcomeDto::Succeeded,
-                TrashItemOutcome::Failed(_) => OperationItemOutcomeDto::Failed,
+                TrashItemOutcome::Failed(code) => {
+                    item_errors.push(item_error(item.source_index, "trash", code));
+                    OperationItemOutcomeDto::Failed
+                }
             })
             .collect(),
     };
@@ -1201,15 +1537,42 @@ fn run_next(inner: Arc<OperationInner>) {
         OperationJobStateDto::Failed
     };
     drop(queue);
+    inner
+        .cancellations
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&job_id.get());
+    let completion = inner
+        .completions
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&job_id.get());
+    // Completion updates dependent state such as the cut clipboard. Publish
+    // the terminal snapshot only after those updates finish, without holding
+    // service locks while a callback may submit a follow-up operation.
+    if let Some(completion) = completion {
+        completion.run(&outcomes);
+    }
     if let Some(record) = inner
         .records
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get_mut(&job_id.get())
     {
+        record.item_errors = item_errors;
+        record.phase = OperationPhaseDto::Finished;
         record.state = state;
         record.finished_at = Some(Instant::now());
         record.outcomes.clone_from(&outcomes);
+        inner.log.record(
+            &record.operation_id,
+            Some(job_id.get()),
+            record.kind,
+            "jobFinished",
+            Some(state),
+            &outcomes,
+            &record.item_errors,
+        );
         inner.recovery.record(
             job_id.get(),
             kind_name(record.kind),
@@ -1223,19 +1586,7 @@ fn run_next(inner: Arc<OperationInner>) {
             &record.destination_directories,
         );
     }
-    inner
-        .cancellations
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .remove(&job_id.get());
-    let completion = inner
-        .completions
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .remove(&job_id.get());
-    if let Some(completion) = completion {
-        completion(&outcomes);
-    }
+    publish(&inner, true);
 }
 
 fn conflict_paths(
@@ -1504,6 +1855,12 @@ fn snapshot(record: &OperationRecord) -> OperationJobDto {
     let progress = record.progress;
     OperationJobDto {
         job_id: record.id.get(),
+        operation_id: record.operation_id.clone(),
+        operation_item_count: record.operation_item_count,
+        operation_state: None,
+        operation_outcomes: None,
+        phase: record.phase,
+        item_errors: record.item_errors.clone(),
         kind: record.kind,
         state: record.state,
         item_count: record.item_count,
@@ -1518,7 +1875,12 @@ fn snapshot(record: &OperationRecord) -> OperationJobDto {
         }),
         elapsed_millis: elapsed.as_millis().min(u128::from(u64::MAX)) as u64,
         item_outcomes: record.outcomes.clone(),
-        can_cancel: matches!(
+        can_cancel: !matches!(
+            record.phase,
+            OperationPhaseDto::Verifying
+                | OperationPhaseDto::CleaningSource
+                | OperationPhaseDto::Finished
+        ) && matches!(
             record.state,
             OperationJobStateDto::Queued | OperationJobStateDto::Running
         ) && !record.cancellation_requested,
@@ -1570,6 +1932,180 @@ const fn error(code: OperationErrorCode) -> OperationErrorDto {
     OperationErrorDto { code }
 }
 
+fn validate_transfer_paths(request: &OperationRequest) -> Result<(), OperationErrorDto> {
+    let (sources, destination, moving) = match request {
+        OperationRequest::Copy {
+            sources,
+            destination_directory,
+        } => (sources, destination_directory, false),
+        OperationRequest::Move {
+            sources,
+            destination_directory,
+        } => (sources, destination_directory, true),
+        _ => return Err(error(OperationErrorCode::Unsupported)),
+    };
+    let dest = fs::canonicalize(destination.as_path())
+        .map_err(|_| error(OperationErrorCode::StaleReference))?;
+    let state = StandardPreflightProbe
+        .inspect(&dest)
+        .map_err(|_| error(OperationErrorCode::Io))?
+        .ok_or_else(|| error(OperationErrorCode::StaleReference))?;
+    if state.kind != panedeck_domain::EntryKind::Directory {
+        return Err(error(OperationErrorCode::Unsupported));
+    }
+    if !state.is_writable {
+        return Err(error(OperationErrorCode::PermissionDenied));
+    }
+    for source in sources {
+        let metadata = fs::symlink_metadata(source.as_path())
+            .map_err(|_| error(OperationErrorCode::StaleReference))?;
+        let parent = source
+            .as_path()
+            .parent()
+            .ok_or_else(|| error(OperationErrorCode::Unsupported))?;
+        let parent =
+            fs::canonicalize(parent).map_err(|_| error(OperationErrorCode::StaleReference))?;
+        if parent == dest {
+            return Err(error(OperationErrorCode::SamePath));
+        }
+        if metadata.is_dir() {
+            let canonical = fs::canonicalize(source.as_path())
+                .map_err(|_| error(OperationErrorCode::StaleReference))?;
+            if dest.starts_with(canonical) {
+                return Err(error(OperationErrorCode::DirectoryIntoItself));
+            }
+        }
+        if moving
+            && !StandardPreflightProbe
+                .inspect(&parent)
+                .map_err(|_| error(OperationErrorCode::Io))?
+                .is_some_and(|value| value.is_writable)
+        {
+            return Err(error(OperationErrorCode::PermissionDenied));
+        }
+    }
+    Ok(())
+}
+
+fn request_kind(request: &OperationRequest) -> OperationKindDto {
+    match request {
+        OperationRequest::Copy { .. } | OperationRequest::CopyTo { .. } => OperationKindDto::Copy,
+        OperationRequest::Move { .. } | OperationRequest::MoveTo { .. } => OperationKindDto::Move,
+        OperationRequest::Rename { .. } | OperationRequest::RenameTo { .. } => {
+            OperationKindDto::Rename
+        }
+        OperationRequest::CreateDirectory { .. } => OperationKindDto::CreateDirectory,
+        OperationRequest::Trash { .. } => OperationKindDto::Trash,
+    }
+}
+fn outcome_state(outcomes: &[OperationItemOutcomeDto]) -> OperationJobStateDto {
+    if !outcomes.is_empty()
+        && outcomes
+            .iter()
+            .all(|o| *o == OperationItemOutcomeDto::Cancelled)
+    {
+        OperationJobStateDto::Cancelled
+    } else if outcomes.iter().all(|o| {
+        matches!(
+            o,
+            OperationItemOutcomeDto::Succeeded | OperationItemOutcomeDto::Skipped
+        )
+    }) {
+        OperationJobStateDto::Completed
+    } else if outcomes.iter().any(|o| {
+        matches!(
+            o,
+            OperationItemOutcomeDto::Succeeded | OperationItemOutcomeDto::Skipped
+        )
+    }) {
+        OperationJobStateDto::PartiallyFailed
+    } else {
+        OperationJobStateDto::Failed
+    }
+}
+fn item_error(index: usize, domain: &str, code: impl std::fmt::Debug) -> crate::ItemErrorDto {
+    crate::ItemErrorDto {
+        index: Some(index),
+        domain: domain.into(),
+        code: format!("{code:?}"),
+    }
+}
+
+fn publish(inner: &Arc<OperationInner>, force: bool) {
+    let events: Vec<_> = inner
+        .queue
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .drain_events()
+        .collect();
+    let mut hub = inner
+        .hub
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for event in events {
+        hub.throttle.push(event, Instant::now());
+    }
+    hub.throttle.flush_due(Instant::now());
+    let ready = hub.throttle.drain_ready().count() > 0;
+    if (!force && !ready) || hub.watchers.is_empty() {
+        return;
+    }
+    hub.sequence += 1;
+    let snapshot = OperationService {
+        inner: Arc::clone(inner),
+    }
+    .state_snapshot(hub.sequence);
+    let watchers: Vec<_> = hub.watchers.values().cloned().collect();
+    drop(hub);
+    for watcher in watchers {
+        watcher(snapshot.clone());
+    }
+}
+struct OperationObserver<'a> {
+    inner: &'a Arc<OperationInner>,
+    job_id: JobId,
+}
+impl panedeck_fs::CopyProgressObserver for OperationObserver<'_> {
+    fn on_progress(&mut self, progress: panedeck_fs::CopyProgress) {
+        let progress = JobProgress::new(progress.bytes_copied, progress.total_bytes, 0)
+            .expect("bounded executor progress");
+        let _ = self
+            .inner
+            .queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .report_progress(self.job_id, progress);
+        if let Some(record) = self
+            .inner
+            .records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&self.job_id.get())
+        {
+            record.progress = Some(progress);
+        }
+        publish(self.inner, false);
+    }
+    fn on_phase(&mut self, phase: panedeck_fs::TransferPhase) {
+        let phase = match phase {
+            panedeck_fs::TransferPhase::Preparing => OperationPhaseDto::Preparing,
+            panedeck_fs::TransferPhase::Copying => OperationPhaseDto::Copying,
+            panedeck_fs::TransferPhase::Verifying => OperationPhaseDto::Verifying,
+            panedeck_fs::TransferPhase::CleaningSource => OperationPhaseDto::CleaningSource,
+        };
+        if let Some(record) = self
+            .inner
+            .records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&self.job_id.get())
+        {
+            record.phase = phase;
+        }
+        publish(self.inner, true);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, time::Duration};
@@ -1611,6 +2147,146 @@ mod tests {
             std::thread::sleep(Duration::from_millis(2));
         }
         panic!("job did not finish");
+    }
+
+    #[test]
+    fn events_and_logs_preserve_runtime_errors_and_publish_terminal_after_callback() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("file");
+        let dest = temp.path().join("dest");
+        fs::write(&source, b"data").unwrap();
+        fs::create_dir(&dest).unwrap();
+        let service = OperationService::with_logs(
+            RecoveryService::default(),
+            crate::OperationLog::new(temp.path().join("operations.jsonl")),
+        );
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let events = received.clone();
+        let (watch, initial) = service.watch(move |event| events.lock().unwrap().push(event));
+        assert!(initial.jobs.is_empty());
+        let gate = service.inner.execution_lock.lock().unwrap();
+        let job = service
+            .submit(OperationRequest::Copy {
+                sources: vec![panedeck_domain::NativePath::new(source.clone())],
+                destination_directory: panedeck_domain::NativePath::new(dest),
+            })
+            .unwrap();
+        fs::remove_file(source).unwrap();
+        drop(gate);
+        let done = wait_for_terminal(&service, job.job_id);
+        assert_eq!(done.state, OperationJobStateDto::Failed);
+        assert!(done.item_errors.iter().any(|e| e.code == "SourceChanged"));
+        assert!(service
+            .log()
+            .recent()
+            .iter()
+            .any(|e| e.operation_id == job.operation_id
+                && e.errors.iter().any(|e| e.code == "SourceChanged")));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !received.lock().unwrap().iter().any(|e| {
+            e.jobs
+                .iter()
+                .any(|j| j.job_id == job.job_id && j.state == OperationJobStateDto::Failed)
+        }) {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
+        service.unwatch(watch);
+        assert!(service.inner.hub.lock().unwrap().watchers.is_empty());
+    }
+    #[test]
+    fn cancelling_a_split_operation_does_not_schedule_remaining_work() {
+        let service = OperationService::default();
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let received = observed.clone();
+        let completion = Completion {
+            operation_id: "cancelled-batch".into(),
+            item_count: 2,
+            callback: Box::new(move |outcomes| *received.lock().unwrap() = outcomes.to_vec()),
+        };
+        let remaining = OperationRequest::Copy {
+            sources: vec![panedeck_domain::NativePath::new(PathBuf::from(
+                "/unreachable",
+            ))],
+            destination_directory: panedeck_domain::NativePath::new(PathBuf::from(
+                "/unreachable-target",
+            )),
+        };
+        service
+            .continuation_completion(Some(remaining), completion, vec![], None)
+            .run(&[OperationItemOutcomeDto::Cancelled]);
+        assert_eq!(
+            *observed.lock().unwrap(),
+            vec![OperationItemOutcomeDto::Cancelled; 2]
+        );
+        assert!(service.jobs().is_empty());
+        assert!(service.log().recent().is_empty());
+    }
+
+    #[test]
+    fn queued_cancel_releases_locks_and_runs_callback_before_terminal() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("file");
+        let dest = temp.path().join("dest");
+        fs::write(&source, b"data").unwrap();
+        fs::create_dir(&dest).unwrap();
+        let service = OperationService::default();
+        let gate = service.inner.execution_lock.lock().unwrap();
+        let callback_service = service.clone();
+        let observed = Arc::new(Mutex::new(false));
+        let checked = observed.clone();
+        let job = service
+            .submit_with_completion(
+                OperationRequest::Copy {
+                    sources: vec![panedeck_domain::NativePath::new(source.clone())],
+                    destination_directory: panedeck_domain::NativePath::new(dest),
+                },
+                move |_| {
+                    assert!(callback_service
+                        .jobs()
+                        .iter()
+                        .all(|j| j.state != OperationJobStateDto::Cancelled));
+                    *checked.lock().unwrap() = true;
+                },
+            )
+            .unwrap();
+        let done = service.cancel(job.job_id).unwrap();
+        assert!(*observed.lock().unwrap());
+        assert_eq!(done.state, OperationJobStateDto::Cancelled);
+        assert!(source.exists());
+        drop(gate);
+    }
+
+    #[test]
+    fn terminal_state_waits_for_completion_callback() {
+        let temp = TempDir::new().expect("temp dir");
+        let service = OperationService::default();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let job = service
+            .submit_with_completion(
+                OperationRequest::CreateDirectory {
+                    parent: panedeck_domain::NativePath::new(temp.path()),
+                    name: OsString::from("created"),
+                },
+                move |_| {
+                    entered_tx.send(()).expect("notify callback entry");
+                    release_rx
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("release callback");
+                },
+            )
+            .expect("submit job");
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("callback starts");
+        let state_during_completion = service.job(job.job_id).expect("job snapshot").state;
+        release_tx.send(()).expect("release callback");
+        assert_eq!(state_during_completion, OperationJobStateDto::Running);
+        assert_eq!(
+            wait_for_terminal(&service, job.job_id).state,
+            OperationJobStateDto::Completed
+        );
     }
 
     #[tokio::test]

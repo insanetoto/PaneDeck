@@ -170,8 +170,11 @@ impl<B: FileClipboardBackend> ClipboardService<B> {
         if request.entries.is_empty() {
             return Err(error(ClipboardErrorCode::EmptySelection));
         }
+        let references = browser
+            .normalize_selection(request.entries)
+            .map_err(map_browse_error)?;
         let paths = browser
-            .resolve_entries(request.entries.clone())
+            .resolve_entries(references.clone())
             .map_err(map_browse_error)?;
         let change_count = self
             .backend
@@ -182,7 +185,7 @@ impl<B: FileClipboardBackend> ClipboardService<B> {
             source_pane: Some(request.pane),
             items: paths
                 .into_iter()
-                .zip(request.entries.into_iter().map(Some))
+                .zip(references.into_iter().map(Some))
                 .map(|(path, reference)| ClipboardItem { path, reference })
                 .collect(),
             system_change_count: change_count,

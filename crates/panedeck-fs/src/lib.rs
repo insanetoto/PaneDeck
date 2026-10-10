@@ -22,6 +22,7 @@ pub use conflict::{
 pub use copy::{
     AtomicCancellation, CopyBatchResult, CopyCancellation, CopyErrorCode, CopyExecutor,
     CopyItemOutcome, CopyItemResult, CopyProgress, CopyProgressObserver, NeverCancel,
+    TransferPhase,
 };
 
 pub use directory_reader::{

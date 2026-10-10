@@ -156,6 +156,17 @@ pub struct DirectoryReader {
 }
 
 impl DirectoryReader {
+    pub fn cancel(&self) {
+        if let Some(token) = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            token.cancel();
+        }
+    }
+
     #[must_use]
     pub fn start(&self, root: NativePath, options: DirectoryReadOptions) -> DirectoryReadHandle {
         let request_id = next_request_id();

@@ -11,6 +11,7 @@ export type SymlinkTarget = "file" | "directory" | "other" | "missing" | "unknow
 
 export interface EntrySnapshot {
   reference: EntryReference;
+  treeKey?: string | null;
   displayName: string;
   displayNameIsLossy: boolean;
   kind: EntryKind;

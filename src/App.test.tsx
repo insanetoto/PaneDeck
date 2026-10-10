@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { createRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App, { FilePane } from "./App";
@@ -6,7 +6,7 @@ import type { DirectoryClient, DirectoryListing } from "./browser/directoryApi";
 import type { DirectoryMonitor, DirectoryWatchReason } from "./browser/directoryMonitor";
 import type { LocalLocationsClient } from "./browser/locationsApi";
 import type { ClipboardClient } from "./browser/clipboardApi";
-import type { OperationClient, OperationJob } from "./browser/operationApi";
+import type { OperationClient, OperationJob, OperationSnapshot } from "./browser/operationApi";
 import type { DiagnosticClient } from "./browser/diagnosticApi";
 import type { RecoveryClient } from "./browser/recoveryApi";
 import { I18nProvider, LANGUAGE_STORAGE_KEY } from "./i18n/I18nProvider";
@@ -33,20 +33,22 @@ describe("dual-pane shell", () => {
     window.localStorage.clear();
   });
 
-  it("keeps pane-local state independent and marks activity with text", () => {
+  it("keeps pane-local state independent without activity decorations", () => {
     renderApp();
     const left = screen.getByRole("region", { name: "Left pane" });
     const right = screen.getByRole("region", { name: "Right pane" });
     const leftHidden = within(left).getByRole("button", { name: "Show hidden items" });
     const rightHidden = within(right).getByRole("button", { name: "Show hidden items" });
 
-    expect(within(left).getByText("Active")).toBeInTheDocument();
+    expect(left).not.toHaveAttribute("data-active");
+    expect(screen.queryByText("Active")).not.toBeInTheDocument();
+    expect(document.querySelector(".app-toolbar")).toBeNull();
     expect(within(right).queryByText("Active")).not.toBeInTheDocument();
 
     fireEvent.click(rightHidden);
     expect(rightHidden).toHaveAttribute("aria-pressed", "true");
     expect(leftHidden).toHaveAttribute("aria-pressed", "false");
-    expect(within(right).getByText("Active")).toBeInTheDocument();
+    expect(right).not.toHaveAttribute("data-active");
   });
 
   it("switches the active pane with Control-Tab without stealing standard Tab navigation", () => {
@@ -59,8 +61,101 @@ describe("dual-pane shell", () => {
 
     fireEvent.keyDown(app, { key: "Tab", ctrlKey: true });
 
-    expect(within(right).getByText("Active")).toBeInTheDocument();
+    expect(right).not.toHaveAttribute("data-active");
     expect(right).toHaveFocus();
+  });
+
+  it("automatically prompts conflicts, resolves a batch and opens only the requested log dialog", async () => {
+    let receive!: (snapshot: OperationSnapshot) => void;
+    const status = { persistenceEnabled: true, failedWrites: 0, lastError: null };
+    const conflict: OperationJob = {
+      jobId: 9,
+      operationId: "logical",
+      kind: "copy",
+      state: "awaitingDecision",
+      itemCount: 1,
+      completedItems: 0,
+      failedItems: 0,
+      completedUnits: null,
+      totalUnits: null,
+      bytesPerSecond: null,
+      elapsedMillis: 0,
+      itemOutcomes: [],
+      canCancel: true,
+      conflict: {
+        kind: "fileReplacement",
+        replaceAllowed: true,
+        source: {
+          name: "incoming",
+          parentContext: "/source",
+          kind: "file",
+          byteLen: 1,
+          modifiedMillis: null,
+        },
+        target: {
+          name: "incoming",
+          parentContext: "/target",
+          kind: "file",
+          byteLen: 1,
+          modifiedMillis: null,
+        },
+      },
+    };
+    const done = {
+      ...conflict,
+      conflict: undefined,
+      state: "completed" as const,
+      operationState: "completed" as const,
+      operationOutcomes: ["succeeded" as const],
+      itemOutcomes: ["succeeded" as const],
+      canCancel: false,
+    };
+    const client = {
+      watch: vi.fn(async (callback) => {
+        receive = callback;
+        return vi.fn();
+      }),
+      resolveConflict: vi.fn(async () => done),
+      getLog: vi.fn(async () => ({ events: [], status, recoveryStatus: status })),
+    } as unknown as OperationClient;
+    render(
+      <I18nProvider>
+        <App
+          operationClient={client}
+          locationsClient={{ list: async () => ({ locations: [], volumeScanFailed: false }) }}
+        />
+      </I18nProvider>,
+    );
+    await waitFor(() => expect(client.watch).toHaveBeenCalledOnce());
+    act(() =>
+      receive({ sequence: 1, jobs: [conflict], logStatus: status, recoveryLogStatus: status }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("checkbox"));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Keep both" }));
+    await waitFor(() => expect(client.resolveConflict).toHaveBeenCalledWith(9, "keepBoth", true));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(document.querySelector(".task-drawer")).toBeNull();
+    act(() =>
+      receive({
+        sequence: 2,
+        jobs: [
+          {
+            ...done,
+            state: "failed",
+            operationState: "failed",
+            itemOutcomes: ["failed"],
+            operationOutcomes: ["failed"],
+          },
+        ],
+        logStatus: status,
+        recoveryLogStatus: status,
+      }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Operation log" }));
+    expect(await screen.findByRole("dialog", { name: "Operation log" })).toBeInTheDocument();
+    expect(client.getLog).toHaveBeenCalledOnce();
+    expect(document.querySelector(".task-drawer")).toBeNull();
   });
 
   it("resizes panes by dragging the separator and resets on double click", () => {
@@ -113,7 +208,10 @@ describe("dual-pane shell", () => {
     );
     expect(diagnosticClient.preview).not.toHaveBeenCalled();
     expect(diagnosticClient.export).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Diagnostics" }));
+    fireEvent.contextMenu(
+      screen.getByRole("region", { name: "Left pane" }).querySelector(".file-area")!,
+    );
+    fireEvent.click(screen.getByRole("menuitem", { name: /Diagnostics/ }));
     await screen.findByRole("dialog");
     expect(diagnosticClient.preview).toHaveBeenCalledTimes(1);
     expect(diagnosticClient.export).not.toHaveBeenCalled();
@@ -272,7 +370,8 @@ describe("dual-pane shell", () => {
     await within(right).findByText("target.txt");
     fireEvent.click(source);
 
-    fireEvent.click(screen.getByRole("button", { name: "Copy →" }));
+    fireEvent.contextMenu(screen.getByText("source.txt"));
+    fireEvent.click(screen.getByRole("menuitem", { name: /Copy to Right Pane/ }));
     await waitFor(() =>
       expect(operationClient.transfer).toHaveBeenCalledWith(
         "copy",
@@ -319,7 +418,7 @@ describe("dual-pane shell", () => {
       clientY: 50,
     });
     const menu = await screen.findByRole("menu");
-    fireEvent.click(within(menu).getByRole("menuitem", { name: "Trash" }));
+    fireEvent.click(within(menu).getByRole("menuitem", { name: /Move to Trash/ }));
     const trashDialog = await screen.findByRole("dialog");
     fireEvent.click(within(trashDialog).getByRole("button", { name: "Confirm" }));
     await waitFor(() =>
@@ -330,18 +429,30 @@ describe("dual-pane shell", () => {
   it("routes drag defaults and modifier copies through the operation service", async () => {
     const rightListing = listing("/destination", "folder", "right");
     rightListing.entries[0].kind = "directory";
+    const leftListing = listing("/source", "source.txt", "left");
+    leftListing.entries.push(
+      {
+        ...leftListing.entries[0],
+        reference: { sessionId: "left", entryId: "2" },
+        displayName: "second.txt",
+      },
+      {
+        ...leftListing.entries[0],
+        reference: { sessionId: "left", entryId: "3" },
+        displayName: "local-folder",
+        kind: "directory",
+      },
+    );
     const directoryClient: DirectoryClient = {
       openPath: vi.fn((path: string, options) =>
         Promise.resolve(
-          options.pane === "left" ? listing(path, "source.txt", "left") : rightListing,
+          options.pane === "left" ? { ...leftListing, displayPath: path } : rightListing,
         ),
       ),
       openChild: vi.fn(),
       openParent: vi.fn(),
       reopen: vi.fn((directory) =>
-        Promise.resolve(
-          directory.sessionId === "left" ? listing("/source", "source.txt", "left") : rightListing,
-        ),
+        Promise.resolve(directory.sessionId === "left" ? leftListing : rightListing),
       ),
     };
     const queued: OperationJob = {
@@ -359,6 +470,7 @@ describe("dual-pane shell", () => {
       canCancel: true,
     };
     const operationClient: OperationClient = {
+      validateTransfer: vi.fn().mockResolvedValue(undefined),
       transfer: vi.fn(async (kind) => ({ ...queued, kind })),
       transferToEntry: vi.fn(async (kind) => ({ ...queued, kind })),
       rename: vi.fn(),
@@ -392,13 +504,19 @@ describe("dual-pane shell", () => {
     const dataTransfer = {
       dropEffect: "none",
       effectAllowed: "none",
-      setData: vi.fn(),
+      types: ["application/x-panedeck-entries"],
+      payload: "",
+      setData: vi.fn((_type: string, value: string) => {
+        dataTransfer.payload = value;
+      }),
+      getData: vi.fn(() => dataTransfer.payload),
     };
     const source = await within(left).findByText("source.txt");
     await within(right).findByTitle("folder");
     fireEvent.dragStart(source.closest("[role='row']")!, { dataTransfer });
     fireEvent.dragOver(right, { dataTransfer });
     fireEvent.drop(right, { dataTransfer });
+    fireEvent.dragEnd(source.closest("[role='row']")!, { dataTransfer });
     await waitFor(() =>
       expect(operationClient.transfer).toHaveBeenCalledWith(
         "move",
@@ -419,6 +537,41 @@ describe("dual-pane shell", () => {
         { sessionId: "right", entryId: "1" },
       ),
     );
+    const localFolder = within(left).getByTitle("local-folder").closest("[role='row']")!;
+    const firstRow = within(left).getByText("source.txt").closest("[role='row']")!;
+    const secondRow = within(left).getByText("second.txt").closest("[role='row']")!;
+    fireEvent.click(firstRow);
+    fireEvent.click(secondRow, { ctrlKey: true });
+    fireEvent.dragStart(firstRow, { dataTransfer });
+    fireEvent.drop(localFolder, { dataTransfer });
+    fireEvent.dragEnd(firstRow, { dataTransfer });
+    await waitFor(() =>
+      expect(operationClient.transferToEntry).toHaveBeenLastCalledWith(
+        "move",
+        [
+          { sessionId: "left", entryId: "2" },
+          { sessionId: "left", entryId: "1" },
+        ],
+        { sessionId: "left", entryId: "3" },
+      ),
+    );
+    const calls = vi.mocked(operationClient.transferToEntry).mock.calls.length;
+    fireEvent.dragStart(firstRow, { dataTransfer });
+    fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent.drop(localFolder, { dataTransfer });
+    expect(operationClient.transferToEntry).toHaveBeenCalledTimes(calls);
+    fireEvent.dragStart(firstRow, { dataTransfer });
+    dataTransfer.payload = "foreign-token";
+    fireEvent.drop(localFolder, { dataTransfer });
+    expect(operationClient.transferToEntry).toHaveBeenCalledTimes(calls);
+    fireEvent.dragEnd(firstRow, { dataTransfer });
+    vi.mocked(operationClient.transferToEntry).mockRejectedValue({ code: "directoryIntoItself" });
+    fireEvent.dragStart(firstRow, { dataTransfer });
+    fireEvent.drop(localFolder, { dataTransfer });
+    await waitFor(() =>
+      expect(screen.getByText("This drop target is not available.")).toBeInTheDocument(),
+    );
+    expect(operationClient.transferToEntry).toHaveBeenCalledTimes(calls + 1);
   });
 });
 

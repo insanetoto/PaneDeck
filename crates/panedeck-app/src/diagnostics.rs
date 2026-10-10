@@ -27,11 +27,22 @@ impl DiagnosticService {
         jobs: &[OperationJobDto],
         recovery: &RecoveryService,
     ) -> DiagnosticPreviewDto {
+        self.preview_with_log(jobs, recovery, &crate::OperationLog::default())
+    }
+    pub fn preview_with_log(
+        &self,
+        jobs: &[OperationJobDto],
+        recovery: &RecoveryService,
+        log: &crate::OperationLog,
+    ) -> DiagnosticPreviewDto {
         let jobs = jobs
             .iter()
             .map(|job| {
                 serde_json::json!({
                     "jobId": job.job_id,
+                    "operationId": job.operation_id,
+                    "phase": job.phase,
+                    "itemErrors": job.item_errors,
                     "kind": job.kind,
                     "state": job.state,
                     "itemCount": job.item_count,
@@ -43,7 +54,7 @@ impl DiagnosticService {
             })
             .collect::<Vec<_>>();
         let value = serde_json::json!({
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "product": "PaneDeck",
             "version": env!("CARGO_PKG_VERSION"),
             "platform": std::env::consts::OS,
@@ -55,7 +66,10 @@ impl DiagnosticService {
                 "automaticUpload": false,
             },
             "operationJobs": jobs,
-            "operationLog": recovery.diagnostic_events(),
+            "operationLog": log.recent(),
+            "operationLogStatus": log.status(),
+            "recoveryLogStatus": recovery.log_status(),
+            "recoveryEvents": recovery.diagnostic_events(),
             "recoveryItemCount": recovery.items().len(),
         });
         DiagnosticPreviewDto {

@@ -1,7 +1,22 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import App from "../App";
-import { I18nProvider, LANGUAGE_STORAGE_KEY, resolvePreferredLanguage } from "./I18nProvider";
+import {
+  I18nProvider,
+  LANGUAGE_STORAGE_KEY,
+  resolvePreferredLanguage,
+  useI18n,
+} from "./I18nProvider";
+
+function LanguageHarness() {
+  const { setLanguage } = useI18n();
+  return (
+    <>
+      <button onClick={() => setLanguage("en")}>EN</button>
+      <App />
+    </>
+  );
+}
 
 describe("language foundation", () => {
   beforeEach(() => {
@@ -17,7 +32,7 @@ describe("language foundation", () => {
   it("switches visible text immediately and persists the choice", () => {
     render(
       <I18nProvider>
-        <App />
+        <LanguageHarness />
       </I18nProvider>,
     );
 

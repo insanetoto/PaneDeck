@@ -375,3 +375,310 @@ fn trash_plan_reaches_the_platform_boundary_without_deleting_the_test_source() {
     );
     assert_eq!(fs::read(&source).unwrap(), b"recoverable");
 }
+
+#[tokio::test]
+async fn tree_parent_and_descendant_selection_copies_once_and_keeps_clipboard_references_aligned() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("source");
+    let destination = temp.path().join("destination");
+    fs::create_dir_all(source.join("parent")).unwrap();
+    fs::create_dir(&destination).unwrap();
+    fs::write(source.join("parent/file"), b"data").unwrap();
+    let services = AppServices::with_data_directory(temp.path().join("app-data"));
+    let root = reopen(&services, PaneIdDto::Left, &source).await;
+    let parent = entry(&root, "parent");
+    services
+        .browser()
+        .hold_tree_node(panedeck_app::HoldTreeNodeRequestDto {
+            pane: PaneIdDto::Left,
+            node_id: "parent".into(),
+            entry: Some(parent.clone()),
+            directory: None,
+        })
+        .unwrap();
+    let children = services
+        .browser()
+        .read_tree_node(panedeck_app::ReadTreeNodeRequestDto {
+            pane: PaneIdDto::Left,
+            node_id: "parent".into(),
+            show_hidden: false,
+            sort_field: SortFieldDto::Name,
+            sort_direction: SortDirectionDto::Ascending,
+        })
+        .await
+        .unwrap();
+    let refs = vec![entry(&children, "file"), parent.clone()];
+    let right = reopen(&services, PaneIdDto::Right, &destination).await;
+    let copy = services
+        .operations()
+        .transfer(
+            services.browser(),
+            TransferRequestDto {
+                kind: OperationKindDto::Copy,
+                entries: refs.clone(),
+                destination: TransferDestinationDto::Directory {
+                    directory: right.directory,
+                },
+            },
+        )
+        .unwrap();
+    let job = wait_for_terminal(&services, copy.job_id);
+    assert_eq!(job.state, OperationJobStateDto::Completed);
+    assert_eq!(job.item_count, 1);
+    assert_eq!(fs::read(destination.join("parent/file")).unwrap(), b"data");
+    assert!(!destination.join("file").exists());
+    let clipboard = ClipboardService::new(FakeClipboard::default());
+    let state = clipboard
+        .set(
+            services.browser(),
+            SetClipboardRequestDto {
+                pane: PaneIdDto::Left,
+                intent: ClipboardIntentDto::Cut,
+                entries: refs,
+            },
+        )
+        .unwrap();
+    assert_eq!(state.item_count, 1);
+    assert_eq!(state.cut_entries, vec![parent]);
+}
+
+#[tokio::test]
+async fn drag_preflight_rejects_unsafe_targets_without_jobs_or_disk_changes() {
+    use panedeck_app::OperationErrorCode;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("root");
+    fs::create_dir_all(root.join("parent/child")).unwrap();
+    fs::create_dir(root.join("locked")).unwrap();
+    fs::write(root.join("parent/data"), b"unchanged").unwrap();
+    fs::write(root.join("file"), b"original").unwrap();
+    symlink(root.join("parent/child"), root.join("alias")).unwrap();
+    let services = AppServices::with_data_directory(temp.path().join("app-data"));
+    let listing = reopen(&services, PaneIdDto::Left, &root).await;
+    let parent = entry(&listing, "parent");
+    let descendant = reopen(&services, PaneIdDto::Right, &root.join("parent/child")).await;
+    let alias = reopen(&services, PaneIdDto::Right, &root.join("alias")).await;
+    let locked = reopen(&services, PaneIdDto::Right, &root.join("locked")).await;
+    fs::set_permissions(root.join("locked"), fs::Permissions::from_mode(0o555)).unwrap();
+    let cases = [
+        (
+            parent.clone(),
+            TransferDestinationDto::Directory {
+                directory: listing.directory.clone(),
+            },
+            OperationErrorCode::SamePath,
+        ),
+        (
+            parent.clone(),
+            TransferDestinationDto::Entry {
+                entry: parent.clone(),
+            },
+            OperationErrorCode::DirectoryIntoItself,
+        ),
+        (
+            parent.clone(),
+            TransferDestinationDto::Directory {
+                directory: descendant.directory,
+            },
+            OperationErrorCode::DirectoryIntoItself,
+        ),
+        (
+            parent.clone(),
+            TransferDestinationDto::Directory {
+                directory: alias.directory,
+            },
+            OperationErrorCode::DirectoryIntoItself,
+        ),
+        (
+            entry(&listing, "file"),
+            TransferDestinationDto::Directory {
+                directory: locked.directory,
+            },
+            OperationErrorCode::PermissionDenied,
+        ),
+    ];
+    for (source, destination, expected) in cases {
+        let request = TransferRequestDto {
+            kind: OperationKindDto::Move,
+            entries: vec![source],
+            destination,
+        };
+        assert_eq!(
+            services
+                .operations()
+                .validate_transfer(services.browser(), request.clone())
+                .unwrap_err()
+                .code,
+            expected
+        );
+        assert_eq!(
+            services
+                .operations()
+                .transfer(services.browser(), request)
+                .unwrap_err()
+                .code,
+            expected
+        );
+    }
+    fs::remove_file(root.join("file")).unwrap();
+    let stale = TransferRequestDto {
+        kind: OperationKindDto::Copy,
+        entries: vec![entry(&listing, "file")],
+        destination: TransferDestinationDto::Entry { entry: parent },
+    };
+    assert_eq!(
+        services
+            .operations()
+            .validate_transfer(services.browser(), stale)
+            .unwrap_err()
+            .code,
+        OperationErrorCode::StaleReference
+    );
+    assert!(services.operations().jobs().is_empty());
+    assert_eq!(fs::read(root.join("parent/data")).unwrap(), b"unchanged");
+    assert_eq!(fs::read_dir(root.join("parent/child")).unwrap().count(), 0);
+    fs::set_permissions(root.join("locked"), fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[tokio::test]
+async fn same_pane_multi_drag_and_nested_drag_use_existing_transfer_service() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("root");
+    fs::create_dir_all(root.join("destination/nested")).unwrap();
+    fs::write(root.join("a"), b"a").unwrap();
+    fs::write(root.join("b"), b"b").unwrap();
+    let services = AppServices::with_data_directory(temp.path().join("app-data"));
+    let listing = reopen(&services, PaneIdDto::Left, &root).await;
+    let request = TransferRequestDto {
+        kind: OperationKindDto::Move,
+        entries: vec![entry(&listing, "a"), entry(&listing, "b")],
+        destination: TransferDestinationDto::Entry {
+            entry: entry(&listing, "destination"),
+        },
+    };
+    services
+        .operations()
+        .validate_transfer(services.browser(), request.clone())
+        .unwrap();
+    assert!(services.operations().jobs().is_empty());
+    let job = services
+        .operations()
+        .transfer(services.browser(), request)
+        .unwrap();
+    assert_eq!(
+        wait_for_terminal(&services, job.job_id).state,
+        OperationJobStateDto::Completed
+    );
+    assert!(!root.join("a").exists());
+    assert!(!root.join("b").exists());
+    let children = reopen(&services, PaneIdDto::Left, &root.join("destination")).await;
+    let job = services
+        .operations()
+        .transfer(
+            services.browser(),
+            TransferRequestDto {
+                kind: OperationKindDto::Copy,
+                entries: vec![entry(&children, "a")],
+                destination: TransferDestinationDto::Entry {
+                    entry: entry(&children, "nested"),
+                },
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        wait_for_terminal(&services, job.job_id).state,
+        OperationJobStateDto::Completed
+    );
+    assert_eq!(fs::read(root.join("destination/nested/a")).unwrap(), b"a");
+    assert_eq!(fs::read(root.join("destination/a")).unwrap(), b"a");
+}
+
+#[tokio::test]
+async fn operation_log_correlates_conflict_followups_and_records_rejections_without_secrets() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("private-source");
+    let destination = temp.path().join("private-target");
+    fs::create_dir(&source).unwrap();
+    fs::create_dir(&destination).unwrap();
+    fs::write(source.join("secret-name"), b"secret-contents").unwrap();
+    fs::write(destination.join("secret-name"), b"existing").unwrap();
+    fs::write(source.join("other"), b"other").unwrap();
+    let services = AppServices::with_data_directory(temp.path().join("app-data"));
+    let left = reopen(&services, PaneIdDto::Left, &source).await;
+    let right = reopen(&services, PaneIdDto::Right, &destination).await;
+    let rejected = services.operations().transfer(
+        services.browser(),
+        TransferRequestDto {
+            kind: OperationKindDto::Move,
+            entries: vec![entry(&left, "other")],
+            destination: TransferDestinationDto::Directory {
+                directory: left.directory.clone(),
+            },
+        },
+    );
+    assert!(rejected.is_err());
+    let pending = services
+        .operations()
+        .transfer(
+            services.browser(),
+            TransferRequestDto {
+                kind: OperationKindDto::Copy,
+                entries: vec![entry(&left, "secret-name"), entry(&left, "other")],
+                destination: TransferDestinationDto::Directory {
+                    directory: right.directory,
+                },
+            },
+        )
+        .unwrap();
+    let id = pending.operation_id.clone();
+    let job = services
+        .operations()
+        .resolve_conflict(ResolveConflictRequestDto {
+            job_id: pending.job_id,
+            decision: ConflictDecisionDto::KeepBoth,
+            apply_to_remaining: false,
+        })
+        .unwrap();
+    wait_for_terminal(&services, job.job_id);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if services
+            .operations()
+            .log()
+            .recent()
+            .iter()
+            .any(|e| e.operation_id == id && e.event == "finished")
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(5));
+    }
+    let events = services.operations().log().recent();
+    assert!(events
+        .iter()
+        .any(|e| e.event == "rejected" && e.errors.iter().any(|e| e.code == "SamePath")));
+    let correlated: Vec<_> = events.iter().filter(|e| e.operation_id == id).collect();
+    assert_eq!(
+        correlated.iter().filter(|e| e.event == "finished").count(),
+        1
+    );
+    assert!(correlated.iter().any(|e| e.event == "conflict"));
+    assert!(
+        correlated
+            .iter()
+            .filter_map(|e| e.job_id)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            >= 3
+    );
+    let diagnostic = services.diagnostics().preview_with_log(
+        &services.operations().jobs(),
+        services.recovery(),
+        services.operations().log(),
+    );
+    assert!(!diagnostic.content.contains("secret-name"));
+    assert!(!diagnostic.content.contains("secret-contents"));
+    assert!(!diagnostic.content.contains("private-source"));
+    assert!(diagnostic.content.contains("SamePath"));
+}

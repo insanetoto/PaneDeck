@@ -108,6 +108,7 @@ impl From<SymlinkTarget> for SymlinkTargetDto {
 #[serde(rename_all = "camelCase")]
 pub struct EntrySnapshotDto {
     pub reference: EntryReferenceDto,
+    pub tree_key: Option<String>,
     pub display_name: String,
     pub display_name_is_lossy: bool,
     pub kind: EntryKindDto,
@@ -128,6 +129,7 @@ impl EntrySnapshotDto {
             .map(|duration| duration.as_millis().to_string());
 
         Self {
+            tree_key: None,
             reference: EntryReference::new(session.session_id(), entry.id()).into(),
             display_name: entry.display_name().as_str().to_owned(),
             display_name_is_lossy: entry.display_name().is_lossy(),
@@ -148,6 +150,7 @@ impl EntrySnapshotDto {
             .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
             .map(|duration| duration.as_millis().to_string());
         Self {
+            tree_key: None,
             reference: summary.reference.into(),
             display_name: summary.display_name.clone(),
             display_name_is_lossy: summary.display_name_is_lossy,

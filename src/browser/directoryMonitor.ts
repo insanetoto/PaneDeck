@@ -22,20 +22,29 @@ export interface DirectoryMonitor {
 export const tauriDirectoryMonitor: DirectoryMonitor = {
   async start(pane, directory, onRescan) {
     let watchId: number | null = null;
+    let disposed = false;
+    const pending: DirectoryWatchEvent[] = [];
     const unlisten = await listen<DirectoryWatchEvent>("directory-rescan", ({ payload }) => {
-      if (payload.pane === pane && payload.watchId === watchId) onRescan(payload.reason);
+      if (disposed || payload.pane !== pane) return;
+      if (watchId === null) {
+        if (pending.length < 128) pending.push(payload);
+      } else if (payload.watchId === watchId) onRescan(payload.reason);
     });
     try {
       watchId = await invoke<number>("start_directory_watch", {
         request: { pane, directory },
       });
+      for (const payload of pending) if (payload.watchId === watchId) onRescan(payload.reason);
+      pending.length = 0;
     } catch (error) {
       unlisten();
       throw error;
     }
     return () => {
+      if (disposed) return;
+      disposed = true;
       unlisten();
-      void invoke("stop_directory_watch", { request: { pane, watchId } });
+      void invoke("stop_directory_watch", { request: { pane, watchId } }).catch(() => undefined);
     };
   },
 };

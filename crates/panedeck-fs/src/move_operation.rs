@@ -7,7 +7,7 @@ use std::{
 use crate::{
     copy::{cleanup_staging, commit_staging, copy_to_staging, staging_path},
     CopyCancellation, CopyErrorCode, CopyProgressObserver, OperationKind, OperationPlan,
-    OperationPlanner, PlanValidationErrorKind, PreflightProbe,
+    OperationPlanner, PlanValidationErrorKind, PreflightProbe, TransferPhase,
 };
 
 const VERIFY_BUFFER_SIZE: usize = 1024 * 1024;
@@ -151,6 +151,7 @@ impl MoveExecutor {
             let source_path = source.native_path().as_path();
             let target_path = target.native_path().as_path();
             let outcome = if source.identity().volume_id == target.parent_identity().volume_id {
+                observer.on_phase(TransferPhase::CleaningSource);
                 atomic_rename_no_replace(source_path, target_path)
                     .map(|()| MoveItemOutcome::Moved)
                     .unwrap_or_else(MoveItemOutcome::Failed)
@@ -202,6 +203,7 @@ where
         return MoveItemOutcome::Failed(MoveErrorCode::InvalidPlan);
     };
     let staging = staging_path(parent);
+    observer.on_phase(TransferPhase::Copying);
     let prepared = copy_to_staging(
         source,
         &staging,
@@ -216,6 +218,7 @@ where
         if cancellation.is_cancelled() {
             Err(MoveErrorCode::Cancelled)
         } else {
+            observer.on_phase(TransferPhase::Verifying);
             verifier.verify(source, &staging)
         }
     })
@@ -225,9 +228,11 @@ where
         cleanup_staging(&staging);
         return MoveItemOutcome::Failed(error);
     }
+    observer.on_phase(TransferPhase::Verifying);
     if let Err(error) = verifier.verify(source, target) {
         return MoveItemOutcome::CopiedButSourceNotRemoved(error);
     }
+    observer.on_phase(TransferPhase::CleaningSource);
     match remover.remove_source(source) {
         Ok(()) => MoveItemOutcome::Moved,
         Err(error) => MoveItemOutcome::CopiedButSourceNotRemoved(error),
@@ -464,6 +469,15 @@ mod tests {
         (plan, probe)
     }
 
+    #[derive(Default)]
+    struct PhaseObserver(Vec<TransferPhase>);
+    impl CopyProgressObserver for PhaseObserver {
+        fn on_progress(&mut self, _: crate::CopyProgress) {}
+        fn on_phase(&mut self, phase: TransferPhase) {
+            self.0.push(phase);
+        }
+    }
+
     #[test]
     fn cross_volume_move_copies_verifies_then_removes_source() {
         let temporary = TempDir::new().unwrap();
@@ -474,7 +488,17 @@ mod tests {
         fs::write(source.join("nested/file.txt"), b"payload").unwrap();
         let (plan, probe) = cross_volume_plan(&source, &destination);
 
-        let result = MoveExecutor.execute(&plan, &probe, &NeverCancel, &mut |_| {});
+        let mut observer = PhaseObserver::default();
+        let result = MoveExecutor.execute(&plan, &probe, &NeverCancel, &mut observer);
+        assert_eq!(
+            observer.0,
+            vec![
+                TransferPhase::Copying,
+                TransferPhase::Verifying,
+                TransferPhase::Verifying,
+                TransferPhase::CleaningSource
+            ]
+        );
 
         assert_eq!(result.items[0].outcome, MoveItemOutcome::Moved);
         assert!(!source.exists());

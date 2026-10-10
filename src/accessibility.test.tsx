@@ -52,15 +52,16 @@ describe("accessibility and bilingual audit", () => {
 
     expect(document.documentElement).toHaveAttribute("lang", "zh-CN");
     const left = screen.getByRole("region", { name: "左窗格" });
-    expect(within(left).getByText("活动")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^复制/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "剪切" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "粘贴" })).toBeInTheDocument();
+    expect(within(left).queryByText("活动")).toBeNull();
+    expect(within(left).getByRole("textbox", { name: "文件夹路径" })).toBeInTheDocument();
+    fireEvent.contextMenu(left.querySelector(".file-area")!);
+    expect(screen.getByRole("menuitem", { name: /粘贴/ })).toBeDisabled();
+    expect(screen.getByRole("menuitem", { name: /新建文件夹/ })).toBeDisabled();
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
 
     const main = screen.getByRole("main", { name: "PaneDeck" });
     fireEvent.keyDown(main, { key: "Tab", ctrlKey: true });
-    expect(
-      within(screen.getByRole("region", { name: "右窗格" })).getByText("活动"),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "右窗格" })).toHaveFocus();
+    expect(screen.queryByText("活动")).toBeNull();
   });
 });

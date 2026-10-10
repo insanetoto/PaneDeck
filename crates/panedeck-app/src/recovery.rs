@@ -62,6 +62,7 @@ struct RecoveryItem {
 struct RecoveryInner {
     journal_path: Option<PathBuf>,
     run_id: String,
+    log_status: crate::LogStatusDto,
     recovered: BTreeMap<String, RecoveryItem>,
 }
 
@@ -76,6 +77,7 @@ impl Default for RecoveryService {
             inner: Arc::new(Mutex::new(RecoveryInner {
                 journal_path: None,
                 run_id: run_id(),
+                log_status: crate::LogStatusDto::default(),
                 recovered: BTreeMap::new(),
             })),
         }
@@ -94,6 +96,10 @@ impl RecoveryService {
             inner: Arc::new(Mutex::new(RecoveryInner {
                 journal_path: Some(journal_path),
                 run_id: current_run,
+                log_status: crate::LogStatusDto {
+                    persistence_enabled: true,
+                    ..crate::LogStatusDto::default()
+                },
                 recovered,
             })),
         }
@@ -108,11 +114,11 @@ impl RecoveryService {
         source_paths: &[PathBuf],
         destination_directories: &[PathBuf],
     ) {
-        let inner = self
+        let mut inner = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(path) = &inner.journal_path else {
+        let Some(path) = inner.journal_path.clone() else {
             return;
         };
         let event = JournalEvent {
@@ -131,13 +137,26 @@ impl RecoveryService {
                 .map(|value| value.to_string_lossy().into_owned())
                 .collect(),
         };
-        let Ok(serialized) = serde_json::to_string(&event) else {
-            return;
-        };
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-            let _ = writeln!(file, "{serialized}");
-            let _ = file.sync_data();
+        let result = (|| -> std::io::Result<()> {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let serialized = serde_json::to_string(&event)?;
+            let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+            writeln!(file, "{serialized}")?;
+            file.sync_data()
+        })();
+        if let Err(error) = result {
+            inner.log_status.failed_writes += 1;
+            inner.log_status.last_error = Some(format!("{:?}", error.kind()));
         }
+    }
+    pub fn log_status(&self) -> crate::LogStatusDto {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .log_status
+            .clone()
     }
 
     #[must_use]
@@ -319,6 +338,20 @@ fn anonymize(value: &str) -> String {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn failed_journal_write_is_visible_without_exposing_paths() {
+        let temp = TempDir::new().unwrap();
+        let blocked = temp.path().join("secret-parent");
+        fs::write(&blocked, b"blocked").unwrap();
+        let service = RecoveryService::new(blocked.join("journal.jsonl"));
+        service.record(1, "copy", "running", "executing", &[], &[]);
+        let status = service.log_status();
+        assert_eq!(status.failed_writes, 1);
+        assert!(!serde_json::to_string(&status)
+            .unwrap()
+            .contains("secret-parent"));
+    }
 
     #[test]
     fn interrupted_job_is_recovered_without_deleting_source() {

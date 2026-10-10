@@ -1,11 +1,12 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{hash_map::RandomState, HashMap, VecDeque},
     fmt,
+    hash::BuildHasher,
     num::NonZeroUsize,
     path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Mutex,
+        Arc, Mutex,
     },
 };
 
@@ -23,7 +24,7 @@ use crate::{DirectoryReferenceDto, EntryReferenceDto, EntrySnapshotDto};
 
 const MAX_STORED_SESSIONS: usize = 128;
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PaneIdDto {
     Left,
@@ -87,6 +88,36 @@ pub struct NavigateKnownRequestDto {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HoldTreeNodeRequestDto {
+    pub pane: PaneIdDto,
+    pub node_id: String,
+    pub directory: Option<DirectoryReferenceDto>,
+    pub entry: Option<EntryReferenceDto>,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TreeNodeRequestDto {
+    pub pane: PaneIdDto,
+    pub node_id: String,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReadTreeNodeRequestDto {
+    pub pane: PaneIdDto,
+    pub node_id: String,
+    pub show_hidden: bool,
+    pub sort_field: SortFieldDto,
+    pub sort_direction: SortDirectionDto,
+}
+struct TreeNode {
+    root: NativePath,
+    session: DirectorySessionId,
+    reader: Arc<DirectoryReader>,
+}
+const MAX_TREE_NODES_PER_PANE: usize = 1024;
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WatchDirectoryRequestDto {
     pub pane: PaneIdDto,
     pub directory: DirectoryReferenceDto,
@@ -124,6 +155,7 @@ pub enum BrowseErrorCode {
     StaleReference,
     Cancelled,
     Io,
+    ResourceLimit,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -143,6 +175,7 @@ impl std::error::Error for BrowseErrorDto {}
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DirectoryListingDto {
+    pub tree_key: String,
     pub directory: DirectoryReferenceDto,
     pub display_path: String,
     pub can_go_up: bool,
@@ -154,6 +187,7 @@ pub struct DirectoryListingDto {
 struct SessionStore {
     sessions: HashMap<DirectorySessionId, DirectorySession>,
     order: VecDeque<DirectorySessionId>,
+    held: HashMap<DirectorySessionId, usize>,
 }
 
 impl SessionStore {
@@ -161,23 +195,48 @@ impl SessionStore {
         let id = session.reference().session_id();
         self.sessions.insert(id, session);
         self.order.push_back(id);
-        while self.order.len() > MAX_STORED_SESSIONS {
-            if let Some(expired) = self.order.pop_front() {
-                self.sessions.remove(&expired);
+        self.evict();
+    }
+    fn pin(&mut self, id: DirectorySessionId) {
+        *self.held.entry(id).or_default() += 1;
+    }
+    fn unpin(&mut self, id: DirectorySessionId) {
+        if let Some(count) = self.held.get_mut(&id) {
+            *count -= 1;
+            if *count == 0 {
+                self.held.remove(&id);
             }
         }
+        self.evict();
+    }
+    fn evict(&mut self) {
+        let mut remaining = self
+            .order
+            .iter()
+            .filter(|id| !self.held.contains_key(id))
+            .count();
+        self.order.retain(|id| {
+            if remaining > MAX_STORED_SESSIONS && !self.held.contains_key(id) {
+                self.sessions.remove(id);
+                remaining -= 1;
+                false
+            } else {
+                true
+            }
+        });
     }
 }
 
 pub struct BrowserService {
     readers: [DirectoryReader; 2],
     sessions: Mutex<SessionStore>,
-    watches: Mutex<[Option<ActiveWatch>; 2]>,
+    watches: Mutex<HashMap<(PaneIdDto, u64), ActiveWatch>>,
     next_watch_id: AtomicU64,
+    tree_nodes: Mutex<HashMap<(PaneIdDto, String), TreeNode>>,
+    entry_keys: RandomState,
 }
 
 struct ActiveWatch {
-    id: u64,
     _watch: DirectoryWatch,
 }
 
@@ -186,13 +245,124 @@ impl Default for BrowserService {
         Self {
             readers: [DirectoryReader::default(), DirectoryReader::default()],
             sessions: Mutex::new(SessionStore::default()),
-            watches: Mutex::new([None, None]),
+            watches: Mutex::new(HashMap::new()),
             next_watch_id: AtomicU64::new(1),
+            tree_nodes: Mutex::new(HashMap::new()),
+            entry_keys: RandomState::new(),
         }
     }
 }
 
 impl BrowserService {
+    pub fn hold_tree_node(&self, request: HoldTreeNodeRequestDto) -> Result<(), BrowseErrorDto> {
+        if request.node_id.is_empty() || request.node_id.len() > 128 {
+            return Err(error(BrowseErrorCode::InvalidPath));
+        }
+        let mut nodes = self
+            .tree_nodes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A root rescan pins its replacement before releasing the previous root.
+        // Reserve one bounded handover slot so a full tree never loses its root.
+        let budget = MAX_TREE_NODES_PER_PANE
+            + usize::from(request.directory.is_some() && request.entry.is_none());
+        if !nodes.contains_key(&(request.pane, request.node_id.clone()))
+            && nodes
+                .keys()
+                .filter(|(pane, _)| *pane == request.pane)
+                .count()
+                >= budget
+        {
+            return Err(error(BrowseErrorCode::ResourceLimit));
+        }
+        let mut sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (root, id) = match (request.directory, request.entry) {
+            (Some(directory), None) => {
+                let reference = panedeck_domain::DirectoryReference::try_from(directory)
+                    .map_err(|_| error(BrowseErrorCode::StaleReference))?;
+                let id = reference.session_id();
+                (
+                    sessions
+                        .sessions
+                        .get(&id)
+                        .ok_or_else(|| error(BrowseErrorCode::StaleReference))?
+                        .native_root()
+                        .clone(),
+                    id,
+                )
+            }
+            (None, Some(entry)) => {
+                let reference = EntryReference::try_from(entry)
+                    .map_err(|_| error(BrowseErrorCode::StaleReference))?;
+                let entry = sessions
+                    .sessions
+                    .get(&reference.session_id())
+                    .ok_or_else(|| error(BrowseErrorCode::StaleReference))?
+                    .resolve(reference)
+                    .map_err(|_| error(BrowseErrorCode::StaleReference))?;
+                if entry.metadata().kind() != EntryKind::Directory {
+                    return Err(error(BrowseErrorCode::NotDirectory));
+                }
+                (entry.native_path().clone(), reference.session_id())
+            }
+            _ => return Err(error(BrowseErrorCode::InvalidPath)),
+        };
+        sessions.pin(id);
+        if let Some(old) = nodes.insert(
+            (request.pane, request.node_id),
+            TreeNode {
+                root,
+                session: id,
+                reader: Arc::new(DirectoryReader::default()),
+            },
+        ) {
+            old.reader.cancel();
+            sessions.unpin(old.session);
+        }
+        Ok(())
+    }
+    pub fn release_tree_node(&self, request: TreeNodeRequestDto) {
+        let mut nodes = self
+            .tree_nodes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(node) = nodes.remove(&(request.pane, request.node_id)) {
+            node.reader.cancel();
+            self.sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .unpin(node.session);
+        }
+    }
+    pub async fn read_tree_node(
+        &self,
+        request: ReadTreeNodeRequestDto,
+    ) -> Result<DirectoryListingDto, BrowseErrorDto> {
+        let key = (request.pane, request.node_id);
+        let (root, reader) = {
+            let nodes = self
+                .tree_nodes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let node = nodes
+                .get(&key)
+                .ok_or_else(|| error(BrowseErrorCode::Cancelled))?;
+            (node.root.clone(), Arc::clone(&node.reader))
+        };
+        self.read_with_reader(
+            &reader,
+            root,
+            request.show_hidden,
+            request.sort_field,
+            request.sort_direction,
+            Some((&key, &reader)),
+        )
+        .await
+    }
+
     pub fn start_watch<F>(
         &self,
         request: WatchDirectoryRequestDto,
@@ -201,6 +371,19 @@ impl BrowserService {
     where
         F: Fn(DirectoryWatchEventDto) + Send + 'static,
     {
+        // Reserve under one lock so concurrent starts cannot exceed the budget.
+        let mut watches = self
+            .watches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if watches
+            .keys()
+            .filter(|(pane, _)| *pane == request.pane)
+            .count()
+            >= 128
+        {
+            return Err(error(BrowseErrorCode::ResourceLimit));
+        }
         let root = self.known_root(request.directory)?;
         let watch_id = self.next_watch_id.fetch_add(1, Ordering::Relaxed);
         let pane = request.pane;
@@ -216,33 +399,16 @@ impl BrowserService {
                 });
             })
             .map_err(map_watch_error)?;
-        let replaced = self
-            .watches
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)[pane.index()]
-        .replace(ActiveWatch {
-            id: watch_id,
-            _watch: watch,
-        });
-        drop(replaced);
+        watches.insert((pane, watch_id), ActiveWatch { _watch: watch });
         Ok(watch_id)
     }
 
     pub fn stop_watch(&self, request: StopDirectoryWatchRequestDto) {
-        let removed = {
-            let mut watches = self
-                .watches
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if watches[request.pane.index()]
-                .as_ref()
-                .is_some_and(|active| active.id == request.watch_id)
-            {
-                watches[request.pane.index()].take()
-            } else {
-                None
-            }
-        };
+        let removed = self
+            .watches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&(request.pane, request.watch_id));
         drop(removed);
     }
 
@@ -367,6 +533,38 @@ impl BrowserService {
             .collect()
     }
 
+    /// Validate every capability before removing duplicated parents/descendants.
+    pub fn normalize_selection(
+        &self,
+        references: Vec<EntryReferenceDto>,
+    ) -> Result<Vec<EntryReferenceDto>, BrowseErrorDto> {
+        let paths = self.resolve_entries(references.clone())?;
+        let directories: Vec<bool> = paths
+            .iter()
+            .map(|path| std::fs::symlink_metadata(path.as_path()).is_ok_and(|meta| meta.is_dir()))
+            .collect();
+        Ok(references
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, reference)| {
+                let covered = paths.iter().enumerate().any(|(j, other)| {
+                    j != i
+                        && ((other == &paths[i] && j < i)
+                            || (directories[j]
+                                && other != &paths[i]
+                                && paths[i].as_path().starts_with(other.as_path())))
+                });
+                (!covered).then_some(reference)
+            })
+            .collect())
+    }
+    pub fn resolve_selection(
+        &self,
+        references: Vec<EntryReferenceDto>,
+    ) -> Result<Vec<NativePath>, BrowseErrorDto> {
+        self.resolve_entries(self.normalize_selection(references)?)
+    }
+
     fn known_root(&self, reference: DirectoryReferenceDto) -> Result<NativePath, BrowseErrorDto> {
         let reference = panedeck_domain::DirectoryReference::try_from(reference)
             .map_err(|_| error(BrowseErrorCode::StaleReference))?;
@@ -389,6 +587,26 @@ impl BrowserService {
         sort_field: SortFieldDto,
         sort_direction: SortDirectionDto,
     ) -> Result<DirectoryListingDto, BrowseErrorDto> {
+        self.read_with_reader(
+            &self.readers[pane.index()],
+            root,
+            show_hidden,
+            sort_field,
+            sort_direction,
+            None,
+        )
+        .await
+    }
+    async fn read_with_reader(
+        &self,
+        reader: &DirectoryReader,
+        root: NativePath,
+        show_hidden: bool,
+        sort_field: SortFieldDto,
+        sort_direction: SortDirectionDto,
+        owner: Option<(&(PaneIdDto, String), &Arc<DirectoryReader>)>,
+    ) -> Result<DirectoryListingDto, BrowseErrorDto> {
+        let tree_key = format!("{:016x}", self.entry_keys.hash_one(&root));
         let display_path = root.as_path().to_string_lossy().into_owned();
         let can_go_up = root.as_path().parent().is_some();
         let options = DirectoryReadOptions {
@@ -399,7 +617,7 @@ impl BrowserService {
                 direction: map_sort_direction(sort_direction),
             },
         };
-        let mut handle = self.readers[pane.index()].start(root, options);
+        let mut handle = reader.start(root, options);
         let mut entries = Vec::new();
         let mut warnings = Vec::new();
         while let Some(event) = handle.next_event().await {
@@ -415,11 +633,39 @@ impl BrowserService {
         }
         let session = handle.finish().await.map_err(map_read_error)?;
         let directory = session.reference().into();
-        self.sessions
+        for entry in &mut entries {
+            if let Ok(reference) = EntryReference::try_from(entry.reference.clone()) {
+                if let Ok(native) = session.resolve(reference) {
+                    entry.tree_key = Some(format!(
+                        "{:016x}",
+                        self.entry_keys.hash_one(native.native_path())
+                    ));
+                }
+            }
+        }
+        let mut nodes = self
+            .tree_nodes
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(session);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((key, reader)) = owner {
+            let node = nodes
+                .get_mut(key)
+                .filter(|node| Arc::ptr_eq(&node.reader, reader))
+                .ok_or_else(|| error(BrowseErrorCode::Cancelled))?;
+            let old = node.session;
+            node.session = session.reference().session_id();
+            sessions.pin(node.session);
+            sessions.insert(session);
+            sessions.unpin(old);
+        } else {
+            sessions.insert(session);
+        }
         Ok(DirectoryListingDto {
+            tree_key,
             directory,
             display_path,
             can_go_up,
@@ -492,6 +738,390 @@ mod tests {
             show_hidden: false,
             sort_field: SortFieldDto::Name,
             sort_direction: SortDirectionDto::Ascending,
+        }
+    }
+
+    fn node_request(id: &str) -> ReadTreeNodeRequestDto {
+        ReadTreeNodeRequestDto {
+            pane: PaneIdDto::Left,
+            node_id: id.into(),
+            show_hidden: false,
+            sort_field: SortFieldDto::Name,
+            sort_direction: SortDirectionDto::Ascending,
+        }
+    }
+    #[tokio::test]
+    async fn full_tree_budget_keeps_a_slot_for_root_handover() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("child")).unwrap();
+        let service = BrowserService::default();
+        let root = service
+            .open_path(request(temp.path().to_string_lossy().into_owned()))
+            .await
+            .unwrap();
+        service
+            .hold_tree_node(HoldTreeNodeRequestDto {
+                pane: PaneIdDto::Left,
+                node_id: "old-root".into(),
+                directory: Some(root.directory.clone()),
+                entry: None,
+            })
+            .unwrap();
+        for i in 0..MAX_TREE_NODES_PER_PANE - 1 {
+            service
+                .hold_tree_node(HoldTreeNodeRequestDto {
+                    pane: PaneIdDto::Left,
+                    node_id: i.to_string(),
+                    directory: None,
+                    entry: Some(root.entries[0].reference.clone()),
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            service
+                .hold_tree_node(HoldTreeNodeRequestDto {
+                    pane: PaneIdDto::Left,
+                    node_id: "over-budget".into(),
+                    directory: None,
+                    entry: Some(root.entries[0].reference.clone())
+                })
+                .unwrap_err()
+                .code,
+            BrowseErrorCode::ResourceLimit
+        );
+        service
+            .hold_tree_node(HoldTreeNodeRequestDto {
+                pane: PaneIdDto::Left,
+                node_id: "new-root".into(),
+                directory: Some(root.directory.clone()),
+                entry: None,
+            })
+            .unwrap();
+        service.release_tree_node(TreeNodeRequestDto {
+            pane: PaneIdDto::Left,
+            node_id: "old-root".into(),
+        });
+        assert!(service.resolve_directory(root.directory).is_ok());
+        let keys: Vec<_> = service.tree_nodes.lock().unwrap().keys().cloned().collect();
+        for (pane, node_id) in keys {
+            service.release_tree_node(TreeNodeRequestDto { pane, node_id });
+        }
+        assert!(service.sessions.lock().unwrap().held.is_empty());
+    }
+
+    #[tokio::test]
+    async fn independent_watches_rescan_external_changes_in_the_correct_directory() {
+        use std::{
+            sync::mpsc,
+            time::{Duration, Instant},
+        };
+        let temp = TempDir::new().unwrap();
+        let branch = temp.path().join("branch");
+        fs::create_dir(&branch).unwrap();
+        fs::write(temp.path().join("sibling"), b"kept").unwrap();
+        let service = BrowserService::default();
+        let root = service
+            .open_path(request(temp.path().to_string_lossy().into_owned()))
+            .await
+            .unwrap();
+        service
+            .hold_tree_node(HoldTreeNodeRequestDto {
+                pane: PaneIdDto::Left,
+                node_id: "branch".into(),
+                directory: None,
+                entry: Some(
+                    root.entries
+                        .iter()
+                        .find(|entry| entry.display_name == "branch")
+                        .unwrap()
+                        .reference
+                        .clone(),
+                ),
+            })
+            .unwrap();
+        let listing = service
+            .read_tree_node(node_request("branch"))
+            .await
+            .unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let branch_sender = sender.clone();
+        let root_id = service
+            .start_watch(
+                WatchDirectoryRequestDto {
+                    pane: PaneIdDto::Left,
+                    directory: root.directory.clone(),
+                },
+                move |event| {
+                    let _ = sender.send(event);
+                },
+            )
+            .unwrap();
+        let branch_id = service
+            .start_watch(
+                WatchDirectoryRequestDto {
+                    pane: PaneIdDto::Left,
+                    directory: listing.directory,
+                },
+                move |event| {
+                    let _ = branch_sender.send(event);
+                },
+            )
+            .unwrap();
+        assert_ne!(root_id, branch_id);
+        assert_eq!(service.watches.lock().unwrap().len(), 2);
+        // FSEvents startup is asynchronous: use owned fixture mutations as readiness probes.
+        for (id, path) in [(root_id, temp.path()), (branch_id, branch.as_path())] {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut index = 0;
+            loop {
+                fs::write(path.join(format!("ready-{index}")), b"probe").unwrap();
+                index += 1;
+                if receiver
+                    .recv_timeout(Duration::from_millis(250))
+                    .is_ok_and(|event| event.watch_id == id)
+                {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "watcher did not become ready");
+            }
+        }
+        let wait_branch = || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if receiver
+                    .recv_timeout(Duration::from_millis(250))
+                    .is_ok_and(|event| event.watch_id == branch_id)
+                {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "branch change not observed");
+            }
+        };
+        fs::write(branch.join("created"), b"data").unwrap();
+        wait_branch();
+        let created = service
+            .read_tree_node(node_request("branch"))
+            .await
+            .unwrap();
+        assert!(created
+            .entries
+            .iter()
+            .any(|entry| entry.display_name == "created"));
+        fs::rename(branch.join("created"), branch.join("renamed")).unwrap();
+        wait_branch();
+        let renamed = service
+            .read_tree_node(node_request("branch"))
+            .await
+            .unwrap();
+        assert!(renamed
+            .entries
+            .iter()
+            .any(|entry| entry.display_name == "renamed"));
+        assert!(!renamed
+            .entries
+            .iter()
+            .any(|entry| entry.display_name == "created"));
+        fs::remove_file(branch.join("renamed")).unwrap();
+        wait_branch();
+        assert!(!service
+            .read_tree_node(node_request("branch"))
+            .await
+            .unwrap()
+            .entries
+            .iter()
+            .any(|entry| entry.display_name == "renamed"));
+        service.stop_watch(StopDirectoryWatchRequestDto {
+            pane: PaneIdDto::Left,
+            watch_id: branch_id,
+        });
+        assert_eq!(service.watches.lock().unwrap().len(), 1);
+        fs::remove_dir_all(&branch).unwrap();
+        assert_eq!(
+            service
+                .read_tree_node(node_request("branch"))
+                .await
+                .unwrap_err()
+                .code,
+            BrowseErrorCode::NotFound
+        );
+        let refreshed = service
+            .reopen(NavigateKnownRequestDto {
+                pane: PaneIdDto::Left,
+                directory: root.directory,
+                show_hidden: false,
+                sort_field: SortFieldDto::Name,
+                sort_direction: SortDirectionDto::Ascending,
+            })
+            .await
+            .unwrap();
+        assert!(refreshed
+            .entries
+            .iter()
+            .any(|entry| entry.display_name == "sibling"));
+        service.stop_watch(StopDirectoryWatchRequestDto {
+            pane: PaneIdDto::Left,
+            watch_id: root_id,
+        });
+        service.release_tree_node(TreeNodeRequestDto {
+            pane: PaneIdDto::Left,
+            node_id: "branch".into(),
+        });
+        assert!(service.watches.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn normalizes_parent_and_nested_selection_after_validating_every_reference() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("parent")).unwrap();
+        fs::write(temp.path().join("parent/file"), b"data").unwrap();
+        let service = BrowserService::default();
+        let root = service
+            .open_path(request(temp.path().to_string_lossy().into_owned()))
+            .await
+            .unwrap();
+        let parent = root.entries[0].reference.clone();
+        let children = service
+            .open_child(NavigateChildRequestDto {
+                pane: PaneIdDto::Left,
+                entry: parent.clone(),
+                show_hidden: false,
+                sort_field: SortFieldDto::Name,
+                sort_direction: SortDirectionDto::Ascending,
+            })
+            .await
+            .unwrap();
+        let child = children.entries[0].reference.clone();
+        assert_eq!(
+            service
+                .normalize_selection(vec![child.clone(), parent.clone(), child])
+                .unwrap(),
+            vec![parent.clone()]
+        );
+        assert!(service
+            .normalize_selection(vec![
+                parent,
+                EntryReferenceDto {
+                    session_id: "999999999".into(),
+                    entry_id: "1".into()
+                }
+            ])
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn tree_reads_are_independent_and_held_sessions_survive_cache_eviction() {
+        let temp = TempDir::new().unwrap();
+        for i in 0..140 {
+            fs::create_dir(temp.path().join(format!("dir{i}"))).unwrap();
+            fs::write(temp.path().join(format!("dir{i}/file")), b"data").unwrap();
+        }
+        let service = BrowserService::default();
+        let root = service
+            .open_path(request(temp.path().to_string_lossy().into_owned()))
+            .await
+            .unwrap();
+        service
+            .hold_tree_node(HoldTreeNodeRequestDto {
+                pane: PaneIdDto::Left,
+                node_id: "root".into(),
+                directory: Some(root.directory.clone()),
+                entry: None,
+            })
+            .unwrap();
+        for (i, entry) in root.entries.iter().enumerate() {
+            service
+                .hold_tree_node(HoldTreeNodeRequestDto {
+                    pane: PaneIdDto::Left,
+                    node_id: i.to_string(),
+                    directory: None,
+                    entry: Some(entry.reference.clone()),
+                })
+                .unwrap();
+        }
+        let (a, b) = tokio::join!(
+            service.read_tree_node(node_request("0")),
+            service.read_tree_node(node_request("1"))
+        );
+        let mut listings = vec![a.unwrap(), b.unwrap()];
+        for i in 2..140 {
+            listings.push(
+                service
+                    .read_tree_node(node_request(&i.to_string()))
+                    .await
+                    .unwrap(),
+            );
+        }
+        for listing in &listings {
+            assert_eq!(
+                service
+                    .resolve_entries(vec![listing.entries[0].reference.clone()])
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+        assert!(service.resolve_directory(root.directory).is_ok());
+        for i in 0..140 {
+            service.release_tree_node(TreeNodeRequestDto {
+                pane: PaneIdDto::Left,
+                node_id: i.to_string(),
+            });
+        }
+        service.release_tree_node(TreeNodeRequestDto {
+            pane: PaneIdDto::Left,
+            node_id: "root".into(),
+        });
+        assert!(service.tree_nodes.lock().unwrap().is_empty());
+        let sessions = service.sessions.lock().unwrap();
+        assert!(sessions.held.is_empty());
+        assert!(sessions.sessions.len() <= MAX_STORED_SESSIONS);
+    }
+    #[tokio::test]
+    async fn releasing_pending_node_prevents_publication_and_rejects_symlinks() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("child")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(temp.path().join("child"), temp.path().join("link")).unwrap();
+        let service = BrowserService::default();
+        let root = service
+            .open_path(request(temp.path().to_string_lossy().into_owned()))
+            .await
+            .unwrap();
+        service
+            .hold_tree_node(HoldTreeNodeRequestDto {
+                pane: PaneIdDto::Left,
+                node_id: "pending".into(),
+                directory: Some(root.directory),
+                entry: None,
+            })
+            .unwrap();
+        let pending = service.read_tree_node(node_request("pending"));
+        tokio::pin!(pending);
+        tokio::select! { biased; result = &mut pending => panic!("unexpected synchronous read: {result:?}"), () = std::future::ready(()) => {} }
+        service.release_tree_node(TreeNodeRequestDto {
+            pane: PaneIdDto::Left,
+            node_id: "pending".into(),
+        });
+        assert_eq!(pending.await.unwrap_err().code, BrowseErrorCode::Cancelled);
+        #[cfg(unix)]
+        {
+            let link = root
+                .entries
+                .iter()
+                .find(|e| e.display_name == "link")
+                .unwrap();
+            assert_eq!(
+                service
+                    .hold_tree_node(HoldTreeNodeRequestDto {
+                        pane: PaneIdDto::Right,
+                        node_id: "link".into(),
+                        directory: None,
+                        entry: Some(link.reference.clone())
+                    })
+                    .unwrap_err()
+                    .code,
+                BrowseErrorCode::NotDirectory
+            );
         }
     }
 
