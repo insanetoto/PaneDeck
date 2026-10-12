@@ -65,7 +65,10 @@ export function BottomFeedback({
       <div className="feedback-cards">
         {groups.map((group) => {
           const job = group.current,
-            phase = job.phase ?? (job.state === "running" ? "copying" : "preparing"),
+            phase =
+              group.active && job.phase === "finished"
+                ? "preparing"
+                : (job.phase ?? (job.state === "running" ? "copying" : "preparing")),
             value = percent(job);
           const outcomes = group.outcomes,
             completed = outcomes.filter((o) => o === "succeeded" || o === "skipped").length;

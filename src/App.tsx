@@ -1,3 +1,4 @@
+import { useModalFocus } from "./accessibility/useModalFocus";
 import { BottomFeedback } from "./jobs/BottomFeedback";
 import { OperationLogDialog } from "./jobs/OperationLogDialog";
 import { useOperationEvents } from "./jobs/useOperationEvents";
@@ -40,6 +41,7 @@ import {
 } from "./commands/context";
 import {
   commandEnabled,
+  newFolderParentEntry,
   createCommandRouter,
   dispatchWrite,
   dispatchClipboard,
@@ -1274,6 +1276,10 @@ function App({
     );
   };
 
+  useModalFocus(
+    !(visibleConflict || logView) && (commandDialog ?? pasteDraft ?? diagnosticPreview),
+  );
+
   const handleShortcut = (event: ReactKeyboardEvent<HTMLElement>) => {
     if (event.defaultPrevented || isTextInput(event.target) || modalOpen) return;
     if (event.altKey || event.ctrlKey) return;
@@ -1639,6 +1645,15 @@ function App({
                     : "operation.trashTitle",
               )}
             </strong>
+            {commandDialog.type === "createDirectory" &&
+            newFolderParentEntry(commandDialog.context) ? (
+              <p>
+                {t("operation.newFolderInsideDescription").replace(
+                  "{name}",
+                  newFolderParentEntry(commandDialog.context)!.displayName,
+                )}
+              </p>
+            ) : null}
             {commandDialog.type === "trash" ? (
               <p>
                 {t("operation.trashDescription").replace(

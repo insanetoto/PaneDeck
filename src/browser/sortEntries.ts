@@ -4,6 +4,8 @@ export function entryKey(entry: EntrySnapshot) {
   return `${entry.reference.sessionId}:${entry.reference.entryId}`;
 }
 
+const nameCollator = new Intl.Collator(undefined, { numeric: true });
+
 function compareEntries(left: EntrySnapshot, right: EntrySnapshot, field: SortField) {
   if (field === "size") {
     const leftSize = BigInt(left.byteLen ?? "0");
@@ -16,7 +18,7 @@ function compareEntries(left: EntrySnapshot, right: EntrySnapshot, field: SortFi
     return leftTime === rightTime ? 0 : leftTime < rightTime ? -1 : 1;
   }
   if (field === "kind") return left.kind.localeCompare(right.kind);
-  return left.displayName.localeCompare(right.displayName, undefined, { numeric: true });
+  return nameCollator.compare(left.displayName, right.displayName);
 }
 
 export function sortEntries(

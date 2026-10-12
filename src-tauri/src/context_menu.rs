@@ -1,4 +1,6 @@
-use panedeck_app::{ContextCommandDto, ContextMenuEventDto, ContextMenuRequestDto};
+use panedeck_app::{
+    ContextCommandDto, ContextMenuEventDto, ContextMenuKindDto, ContextMenuRequestDto,
+};
 use std::sync::Mutex;
 use tauri::{
     menu::{CheckMenuItem, ContextMenu, Menu, MenuItem, PredefinedMenuItem},
@@ -47,15 +49,16 @@ pub async fn popup_context_menu(
             )
             .map_err(|_| "could not append context item")?;
         } else {
+            let accelerator = if item.command == ContextCommandDto::NewFolder
+                && request.kind == ContextMenuKindDto::Directory
+            {
+                None
+            } else {
+                item.command.accelerator()
+            };
             menu.append(
-                &MenuItem::with_id(
-                    &app,
-                    id,
-                    item.label,
-                    item.enabled,
-                    item.command.accelerator(),
-                )
-                .map_err(|_| "could not create context item")?,
+                &MenuItem::with_id(&app, id, item.label, item.enabled, accelerator)
+                    .map_err(|_| "could not create context item")?,
             )
             .map_err(|_| "could not append context item")?;
         }

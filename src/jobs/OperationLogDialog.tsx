@@ -1,4 +1,5 @@
-import { useEffect, useRef } from "react";
+import { useModalFocus } from "../accessibility/useModalFocus";
+import { useRef } from "react";
 import type { OperationLogSnapshot } from "../browser/operationApi";
 import { useI18n } from "../i18n/I18nProvider";
 import type { MessageKey } from "../i18n/messages";
@@ -15,13 +16,7 @@ export function OperationLogDialog({
 }) {
   const { t } = useI18n();
   const closeButton = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    const previous = document.activeElement as HTMLElement | null;
-    closeButton.current?.focus();
-    return () => {
-      if (previous?.isConnected) previous.focus();
-    };
-  }, []);
+  useModalFocus(true, closeButton);
   const events = data.events
     .filter((event) => !operationId || event.operationId === operationId)
     .slice()

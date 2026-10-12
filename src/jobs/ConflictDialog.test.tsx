@@ -68,3 +68,27 @@ it("uses merge wording for folders and disables invalid type replacement", () =>
   );
   expect(screen.getByRole("button", { name: "Replace existing file" })).toBeDisabled();
 });
+
+it("keeps Tab in the named modal and restores the invoking focus", () => {
+  const invoking = document.createElement("button");
+  document.body.append(invoking);
+  invoking.focus();
+  const view = render(
+    <I18nProvider>
+      <ConflictDialog job={conflictJob("fileReplacement")} onClose={vi.fn()} onResolve={vi.fn()} />
+    </I18nProvider>,
+  );
+  const dialog = screen.getByRole("dialog", { name: "Resolve file conflict" });
+  expect(dialog).toBeInTheDocument();
+  const last = screen.getByRole("button", { name: "Cancel task" });
+  last.focus();
+  fireEvent.keyDown(last, { key: "Tab" });
+  expect(screen.getByRole("button", { name: "Cancel" })).toHaveFocus();
+  const first = screen.getByRole("button", { name: "Cancel" });
+  first.focus();
+  fireEvent.keyDown(first, { key: "Tab", shiftKey: true });
+  expect(last).toHaveFocus();
+  view.unmount();
+  expect(invoking).toHaveFocus();
+  invoking.remove();
+});

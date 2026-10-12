@@ -39,6 +39,7 @@ export const treeKey = (entry: EntrySnapshot) => entry.treeKey ?? entryKey(entry
 /** Only expanded branches are read. Native paths never enter this model. */
 export class DirectoryTree {
   private nodes = new Map<string, Node>();
+  private sortedBranches = new WeakMap<EntrySnapshot[], EntrySnapshot[]>();
   private listeners = new Set<() => void>();
   private rows: TreeRow[] = [];
   private active = false;
@@ -157,6 +158,7 @@ export class DirectoryTree {
       this.options.sortDirection !== options.sortDirection;
     this.root = root;
     this.options = options;
+    if (changedRoot || changedOptions) this.sortedBranches = new WeakMap();
     if (changedRoot) {
       this.rootMissing = false;
       this.bindRoot();
@@ -168,7 +170,11 @@ export class DirectoryTree {
     const rows: TreeRow[] = [];
     const live = new Set<string>();
     const visit = (entries: EntrySnapshot[], parentKey: string | null, level: number) => {
-      const siblings = sortEntries(entries, this.options.sortField, this.options.sortDirection);
+      let siblings = this.sortedBranches.get(entries);
+      if (!siblings) {
+        siblings = sortEntries(entries, this.options.sortField, this.options.sortDirection);
+        this.sortedBranches.set(entries, siblings);
+      }
       siblings.forEach((entry, index) => {
         const key = treeKey(entry);
         live.add(key);

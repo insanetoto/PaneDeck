@@ -1,3 +1,4 @@
+import { useModalFocus } from "../accessibility/useModalFocus";
 import { useEffect, useRef, useState } from "react";
 import type { ConflictDecision, ConflictEntry, OperationJob } from "../browser/operationApi";
 import { useI18n } from "../i18n/I18nProvider";
@@ -48,7 +49,7 @@ export function ConflictDialog({ job, onClose, onResolve, busy = false }: Confli
   const [applyToRemaining, setApplyToRemaining] = useState(false);
   const safeDefault = useRef<HTMLButtonElement>(null);
   const conflict = job.conflict;
-  useEffect(() => safeDefault.current?.focus(), []);
+  useModalFocus(conflict ? job.jobId : null, safeDefault);
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape" && !busy) onClose();
@@ -61,7 +62,12 @@ export function ConflictDialog({ job, onClose, onResolve, busy = false }: Confli
     conflict.kind === "directoryMerge" ? t("conflict.merge") : t("conflict.replace");
   const resolve = (decision: ConflictDecision) => onResolve(decision, applyToRemaining);
   return (
-    <div aria-modal="true" className="paste-dialog-backdrop" role="dialog">
+    <div
+      aria-modal="true"
+      aria-labelledby="conflict-title"
+      className="paste-dialog-backdrop"
+      role="dialog"
+    >
       <section aria-labelledby="conflict-title" className="conflict-dialog">
         <header>
           <div>

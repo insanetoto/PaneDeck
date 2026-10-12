@@ -751,6 +751,67 @@ mod tests {
         }
     }
     #[tokio::test]
+    async fn repeated_tree_navigation_releases_native_resources_and_bounds_history() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("folder")).unwrap();
+        fs::write(temp.path().join("folder/file"), b"owned audit fixture").unwrap();
+        let service = BrowserService::default();
+        for cycle in 0..200 {
+            let root = service
+                .open_path(request(temp.path().to_string_lossy().into_owned()))
+                .await
+                .unwrap();
+            service
+                .hold_tree_node(HoldTreeNodeRequestDto {
+                    pane: PaneIdDto::Left,
+                    node_id: "root-audit".into(),
+                    directory: Some(root.directory.clone()),
+                    entry: None,
+                })
+                .unwrap();
+            service
+                .hold_tree_node(HoldTreeNodeRequestDto {
+                    pane: PaneIdDto::Left,
+                    node_id: "branch-audit".into(),
+                    directory: None,
+                    entry: Some(root.entries[0].reference.clone()),
+                })
+                .unwrap();
+            let children = service
+                .read_tree_node(node_request("branch-audit"))
+                .await
+                .unwrap();
+            assert_eq!(children.entries.len(), 1);
+            if cycle < 12 {
+                let id = service
+                    .start_watch(
+                        WatchDirectoryRequestDto {
+                            pane: PaneIdDto::Left,
+                            directory: children.directory,
+                        },
+                        |_| {},
+                    )
+                    .unwrap();
+                service.stop_watch(StopDirectoryWatchRequestDto {
+                    pane: PaneIdDto::Left,
+                    watch_id: id,
+                });
+            }
+            for id in ["branch-audit", "root-audit"] {
+                service.release_tree_node(TreeNodeRequestDto {
+                    pane: PaneIdDto::Left,
+                    node_id: id.into(),
+                });
+            }
+            assert!(service.tree_nodes.lock().unwrap().is_empty());
+            assert!(service.watches.lock().unwrap().is_empty());
+            let store = service.sessions.lock().unwrap();
+            assert!(store.held.is_empty());
+            assert!(store.sessions.len() <= MAX_STORED_SESSIONS);
+        }
+    }
+
+    #[tokio::test]
     async fn full_tree_budget_keeps_a_slot_for_root_handover() {
         let temp = TempDir::new().unwrap();
         fs::create_dir(temp.path().join("child")).unwrap();

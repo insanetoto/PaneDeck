@@ -1,3 +1,4 @@
+import tokens from "./styles/tokens.css?raw";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import App from "./App";
@@ -29,16 +30,28 @@ describe("accessibility and bilingual audit", () => {
   });
 
   it("meets WCAG AA text contrast for light and dark surfaces", () => {
-    const pairs = [
-      ["#17191d", "#ffffff"],
-      ["#555b65", "#ffffff"],
-      ["#666d78", "#f2f3f5"],
-      ["#f2f4f7", "#202328"],
-      ["#b6bcc7", "#202328"],
-      ["#959ca8", "#202328"],
-    ] as const;
-    for (const [foreground, background] of pairs) {
-      expect(contrast(foreground, background)).toBeGreaterThanOrEqual(4.5);
+    const themes = tokens.split("@media (prefers-color-scheme: dark)");
+    expect(themes).toHaveLength(2);
+    const light = Object.fromEntries(
+      [...themes[0].matchAll(/--(color-[\w-]+): (#[a-f0-9]{6})/g)].map((m) => [m[1], m[2]]),
+    );
+    const dark = {
+      ...light,
+      ...Object.fromEntries(
+        [...themes[1].matchAll(/--(color-[\w-]+): (#[a-f0-9]{6})/g)].map((m) => [m[1], m[2]]),
+      ),
+    };
+    for (const theme of [light, dark]) {
+      for (const text of ["primary", "secondary", "tertiary"]) {
+        for (const surface of ["surface", "surface-raised", "canvas", "control-selected"]) {
+          expect(
+            contrast(theme[`color-text-${text}`], theme[`color-${surface}`]),
+          ).toBeGreaterThanOrEqual(4.5);
+        }
+      }
+      expect(contrast(theme["color-danger"], theme["color-surface-raised"])).toBeGreaterThanOrEqual(
+        4.5,
+      );
     }
   });
 

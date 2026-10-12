@@ -15,14 +15,13 @@ PaneDeck 是一个面向 macOS 的双窗格文件整理工具。它希望让移�
 - 语言：简体中文、英文
 - 隐私：无遥测；诊断信息仅由用户主动导出，并移除完整路径
 
-完整规划见 [docs/product-plan.md](docs/product-plan.md)。
-开发任务见 [docs/tasks.md](docs/tasks.md)。
-v2 交互优化规划见 [docs/product-plan-v2.md](docs/product-plan-v2.md)，研发任务见 [docs/tasks-v2.md](docs/tasks-v2.md)。v2 已完成 PD-100～PD-102（命令契约、操作来源路由、macOS 菜单栏）、PD-110～PD-113（访达式展开目录树、树选择与外部变化同步）及 PD-120 → PD-103 → PD-121（原生上下文菜单、顶栏和活动标识移除、同窗格/跨窗格拖放）。PD-130～PD-133 已完成持久操作日志、真实阶段事件、底部进度和异常提示，并移除右侧任务抽屉。PD-140～PD-141 的完整性能、可访问性与版本验收仍待实施。验收证据见 [docs/v2-acceptance.md](docs/v2-acceptance.md)。
+当前 v2 规划见 [docs/product-plan-v2.md](docs/product-plan-v2.md)，任务见 [docs/tasks-v2.md](docs/tasks-v2.md)。v1 [规划](docs/product-plan.md)与[任务](docs/tasks.md)保留为历史安全基线。
+v2 已完成 PD-100～PD-102（命令契约、操作来源路由、macOS 菜单栏）、PD-110～PD-113（访达式展开目录树、树选择与外部变化同步）及 PD-120 → PD-103 → PD-121（原生上下文菜单、顶栏和活动标识移除、同窗格/跨窗格拖放）。PD-130～PD-133 已完成持久操作日志、真实阶段事件、底部进度和异常提示，并移除右侧任务抽屉。PD-140～PD-141 已完成自动审计、资源回归和文档切换；2026-10-12 用户反馈测试步骤第 1～7 点已测试完毕，第 8 点中断恢复/VoiceOver、第 9 点实机性能/资源暂缓。随后发现 iCloud 桌面目录移动、复制回原处后删除失败的缺陷，已调整系统废纸篓实现，实际 iCloud 场景仍待复测，不宣称全部实机项目通过。验收证据见 [docs/v2-acceptance.md](docs/v2-acceptance.md)。
 多人协作时使用 [docs/collaboration-prompt.md](docs/collaboration-prompt.md) 中的 GitHub 领取约定与可复制提示词。
 首次参与开发请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 的完整协作步骤。
 品牌图标的设计语义与使用边界见 [branding/README.md](branding/README.md)。
 Rust 模块和依赖方向见 [docs/architecture.md](docs/architecture.md)。
-最终端到端证据、macOS 人工检查表、已知限制和本地运行说明见 [docs/mvp-acceptance.md](docs/mvp-acceptance.md)。
+当前端到端证据见 [docs/v2-acceptance.md](docs/v2-acceptance.md)，实机待验收项见 [docs/v2-manual-audit.md](docs/v2-manual-audit.md)；[MVP 验收](docs/mvp-acceptance.md)保留为 v1 历史。
 
 ## 开发方式
 

@@ -185,6 +185,50 @@ describe("dual-pane shell", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("closed with unfinished tasks");
   });
 
+  it("requires explicit confirmation for interrupted-task cleanup and never auto-resumes", async () => {
+    const recoveryClient: RecoveryClient = {
+      list: vi.fn().mockResolvedValue([
+        {
+          recoveryId: "owned-recovery",
+          jobId: 17,
+          kind: "move",
+          checkpoint: "copying",
+          sourceItemsPresent: 1,
+          residualItems: 1,
+          cleanupAvailable: true,
+        },
+      ]),
+      confirmCleanup: vi.fn().mockResolvedValue(undefined),
+    };
+    const operationClient = {
+      listJobs: vi.fn().mockResolvedValue([]),
+      transfer: vi.fn(),
+    } as unknown as OperationClient;
+    render(
+      <I18nProvider>
+        <App
+          recoveryClient={recoveryClient}
+          operationClient={operationClient}
+          locationsClient={{ list: async () => ({ locations: [], volumeScanFailed: false }) }}
+        />
+      </I18nProvider>,
+    );
+    const button = await screen.findByRole("button", { name: "Remove PaneDeck residue" });
+    expect(recoveryClient.confirmCleanup).not.toHaveBeenCalled();
+    expect(operationClient.transfer).not.toHaveBeenCalled();
+    const confirm = vi
+      .spyOn(window, "confirm")
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(true);
+    fireEvent.click(button);
+    expect(recoveryClient.confirmCleanup).not.toHaveBeenCalled();
+    fireEvent.click(button);
+    await waitFor(() =>
+      expect(recoveryClient.confirmCleanup).toHaveBeenCalledExactlyOnceWith("owned-recovery"),
+    );
+    confirm.mockRestore();
+  });
+
   it("does not prepare or export diagnostics until the user asks", async () => {
     const diagnosticClient: DiagnosticClient = {
       preview: vi.fn().mockResolvedValue({ fileName: "diagnostics.json", content: "{}" }),
@@ -335,6 +379,7 @@ describe("dual-pane shell", () => {
       transferToEntry: vi.fn(async (kind) => result(kind)),
       rename: vi.fn(async () => result("rename")),
       createDirectory: vi.fn(async () => result("createDirectory")),
+      createChildDirectory: vi.fn(async () => result("createDirectory")),
       trash: vi.fn(async () => result("trash")),
       listJobs: vi.fn(async () => []),
       cancel: vi.fn(async () => ({
@@ -475,6 +520,7 @@ describe("dual-pane shell", () => {
       transferToEntry: vi.fn(async (kind) => ({ ...queued, kind })),
       rename: vi.fn(),
       createDirectory: vi.fn(),
+      createChildDirectory: vi.fn(),
       trash: vi.fn(),
       listJobs: vi.fn(async () => []),
       cancel: vi.fn(),

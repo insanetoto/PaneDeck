@@ -69,6 +69,13 @@ pub struct CreateDirectoryRequestDto {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateChildDirectoryRequestDto {
+    pub entry: EntryReferenceDto,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TrashRequestDto {
     pub entries: Vec<EntryReferenceDto>,
 }
@@ -514,6 +521,29 @@ impl OperationService {
                 let parent = browser
                     .resolve_directory(request.directory)
                     .map_err(map_browse_error)?;
+                Ok(OperationRequest::CreateDirectory {
+                    parent,
+                    name: OsString::from(request.name),
+                })
+            },
+            Box::new(|_| {}),
+        )
+    }
+
+    pub fn create_child_directory(
+        &self,
+        browser: &BrowserService,
+        request: CreateChildDirectoryRequestDto,
+    ) -> Result<OperationJobDto, OperationErrorDto> {
+        self.logged_request(
+            OperationKindDto::CreateDirectory,
+            || {
+                let parent = browser
+                    .resolve_entries(vec![request.entry])
+                    .map_err(map_browse_error)?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| error(OperationErrorCode::EmptySelection))?;
                 Ok(OperationRequest::CreateDirectory {
                     parent,
                     name: OsString::from(request.name),

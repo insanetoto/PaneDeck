@@ -94,7 +94,7 @@ export function contextItems(menu: CapturedMenu, language: Language, busy = fals
     cut: chinese ? "剪切" : "Cut",
     paste: chinese ? "粘贴…" : "Paste…",
     rename: chinese ? "重命名…" : "Rename…",
-    newFolder: chinese ? "新建文件夹…" : "New Folder…",
+    newFolder: chinese ? "新建文件夹" : "New Folder",
     trash: chinese ? "移至废纸篓…" : "Move to Trash…",
     refresh: chinese ? "刷新" : "Refresh",
     toggleHidden: chinese ? "显示隐藏项目" : "Show Hidden Items",
@@ -122,6 +122,7 @@ export function contextItems(menu: CapturedMenu, language: Language, busy = fals
   };
   const groups: [ContextCommand, number][] = [];
   if (menu.kind === "directory") groups.push(["open", 0], ["toggleFolder", 0]);
+  if (menu.kind === "directory") groups.push(["newFolder", 0]);
   if (menu.kind === "blank")
     groups.push(
       ["newFolder", 0],
@@ -152,7 +153,14 @@ export function contextItems(menu: CapturedMenu, language: Language, busy = fals
       enabled =
         commandEnabled(command, menu.context, busy) &&
         !(command === "rename" && menu.kind === "multiple");
-    return { command, label: labels[command], enabled, group, shortcut: shortcuts[command] };
+    return {
+      command,
+      label: labels[command],
+      enabled,
+      group,
+      shortcut:
+        command === "newFolder" && menu.kind === "directory" ? undefined : shortcuts[command],
+    };
   });
 }
 /** Bounded, captured native session; late or duplicate native events cannot redirect commands. */

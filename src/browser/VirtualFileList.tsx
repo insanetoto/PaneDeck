@@ -132,6 +132,10 @@ export function VirtualFileList({
   const effectiveAnchorId = anchorId && validIds.has(anchorId) ? anchorId : null;
   const { start, count } = calculateVisibleRange(scrollTop, viewportHeight, sorted.length);
   const visible = sorted.slice(start, start + count);
+  const activeDescendant =
+    effectiveFocusedId && visible.some((entry) => entryKey(entry) === effectiveFocusedId)
+      ? `file-row-${effectiveFocusedId}`
+      : undefined;
 
   useEffect(() => {
     onSelectionChange?.(
@@ -253,9 +257,7 @@ export function VirtualFileList({
       role={treeRows ? "treegrid" : "grid"}
       tabIndex={treeRows ? 0 : undefined}
       onKeyDown={treeRows ? handleKeyDown : undefined}
-      aria-activedescendant={
-        treeRows && effectiveFocusedId ? `file-row-${effectiveFocusedId}` : undefined
-      }
+      aria-activedescendant={treeRows ? activeDescendant : undefined}
       aria-label={t("list.label")}
       aria-multiselectable="true"
       aria-rowcount={sorted.length + 1}
@@ -268,9 +270,7 @@ export function VirtualFileList({
         <span role="columnheader">{header("modifiedAt", t("list.modified"))}</span>
       </div>
       <div
-        aria-activedescendant={
-          !treeRows && effectiveFocusedId ? `file-row-${effectiveFocusedId}` : undefined
-        }
+        aria-activedescendant={!treeRows ? activeDescendant : undefined}
         className="file-list-viewport"
         onKeyDown={treeRows ? undefined : handleKeyDown}
         onDragOver={(event) => {

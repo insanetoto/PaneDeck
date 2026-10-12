@@ -7,11 +7,11 @@ use std::{
 
 use panedeck_app::{
     AppServices, ClipboardIntentDto, ClipboardService, ClipboardStateDto, ConflictDecisionDto,
-    CreateDirectoryRequestDto, EntryReferenceDto, NavigateDirectoryRequestDto,
-    OperationItemOutcomeDto, OperationJobDto, OperationJobStateDto, OperationKindDto, PaneIdDto,
-    PasteDraftRequestDto, PasteItemCompletion, PreparePasteRequestDto, RenameRequestDto,
-    ResolveConflictRequestDto, SetClipboardRequestDto, SortDirectionDto, SortFieldDto,
-    TransferDestinationDto, TransferRequestDto,
+    CreateChildDirectoryRequestDto, CreateDirectoryRequestDto, EntryReferenceDto,
+    NavigateDirectoryRequestDto, OperationItemOutcomeDto, OperationJobDto, OperationJobStateDto,
+    OperationKindDto, PaneIdDto, PasteDraftRequestDto, PasteItemCompletion, PreparePasteRequestDto,
+    RenameRequestDto, ResolveConflictRequestDto, SetClipboardRequestDto, SortDirectionDto,
+    SortFieldDto, TransferDestinationDto, TransferRequestDto,
 };
 use panedeck_domain::NativePath;
 use panedeck_fs::{
@@ -72,6 +72,102 @@ async fn reopen(
         .open_path(navigation(pane, path))
         .await
         .expect("fixture directory opens")
+}
+
+#[tokio::test]
+async fn newly_created_folder_can_receive_nested_folders_without_entering_it() {
+    let temporary = TempDir::new().unwrap();
+    let left = temporary.path().join("left");
+    let right = temporary.path().join("right");
+    fs::create_dir(&left).unwrap();
+    fs::create_dir(&right).unwrap();
+    fs::write(left.join("file.txt"), b"test-owned").unwrap();
+    let services = AppServices::with_data_directory(temporary.path().join("app-data"));
+    let root = reopen(&services, PaneIdDto::Left, &left).await;
+    let parent = services
+        .operations()
+        .create_directory(
+            services.browser(),
+            CreateDirectoryRequestDto {
+                directory: root.directory.clone(),
+                name: "parent".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        wait_for_terminal(&services, parent.job_id).state,
+        OperationJobStateDto::Completed
+    );
+    let refreshed = reopen(&services, PaneIdDto::Left, &left).await;
+    let parent_reference = entry(&refreshed, "parent");
+    // Opening the other pane does not redirect the captured parent entry.
+    reopen(&services, PaneIdDto::Right, &right).await;
+    let child = services
+        .operations()
+        .create_child_directory(
+            services.browser(),
+            CreateChildDirectoryRequestDto {
+                entry: parent_reference.clone(),
+                name: "child".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        wait_for_terminal(&services, child.job_id).state,
+        OperationJobStateDto::Completed
+    );
+    assert!(left.join("parent/child").is_dir());
+    assert!(!left.join("child").exists());
+    assert!(!right.join("child").exists());
+    let nested = reopen(&services, PaneIdDto::Left, &left.join("parent")).await;
+    let grandchild = services
+        .operations()
+        .create_child_directory(
+            services.browser(),
+            CreateChildDirectoryRequestDto {
+                entry: entry(&nested, "child"),
+                name: "grandchild".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        wait_for_terminal(&services, grandchild.job_id).state,
+        OperationJobStateDto::Completed
+    );
+    assert!(left.join("parent/child/grandchild").is_dir());
+
+    assert!(services
+        .operations()
+        .create_child_directory(
+            services.browser(),
+            CreateChildDirectoryRequestDto {
+                entry: parent_reference.clone(),
+                name: "../escape".into(),
+            }
+        )
+        .is_err());
+    assert!(services
+        .operations()
+        .create_child_directory(
+            services.browser(),
+            CreateChildDirectoryRequestDto {
+                entry: entry(&refreshed, "file.txt"),
+                name: "rejected".into(),
+            }
+        )
+        .is_err());
+    assert!(services
+        .operations()
+        .create_child_directory(
+            services.browser(),
+            CreateChildDirectoryRequestDto {
+                entry: parent_reference,
+                name: "child".into(),
+            }
+        )
+        .is_err());
+    assert_eq!(fs::read(left.join("file.txt")).unwrap(), b"test-owned");
+    assert!(!left.join("escape").exists());
 }
 
 #[tokio::test]

@@ -43,11 +43,11 @@ pub use locations::{
 };
 pub use operations::{
     CancelOperationRequestDto, ConflictDecisionDto, ConflictEntryDto, ConflictKindDto,
-    CreateDirectoryRequestDto, OperationConflictDto, OperationErrorCode, OperationErrorDto,
-    OperationItemOutcomeDto, OperationJobDto, OperationJobStateDto, OperationKindDto,
-    OperationPhaseDto, OperationResultDto, OperationService, OperationSnapshotDto,
-    RenameRequestDto, ResolveConflictRequestDto, TransferDestinationDto, TransferRequestDto,
-    TrashRequestDto,
+    CreateChildDirectoryRequestDto, CreateDirectoryRequestDto, OperationConflictDto,
+    OperationErrorCode, OperationErrorDto, OperationItemOutcomeDto, OperationJobDto,
+    OperationJobStateDto, OperationKindDto, OperationPhaseDto, OperationResultDto,
+    OperationService, OperationSnapshotDto, RenameRequestDto, ResolveConflictRequestDto,
+    TransferDestinationDto, TransferRequestDto, TrashRequestDto,
 };
 pub use recovery::{CleanupRecoveryRequestDto, RecoveryError, RecoveryItemDto, RecoveryService};
 

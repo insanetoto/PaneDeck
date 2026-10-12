@@ -35,6 +35,9 @@ describe("context menu", () => {
     const directory = captureMenu(context, 20, 30);
     expect(directory.kind).toBe("directory");
     expect(
+      contextItems(directory, "en").find((item) => item.command === "newFolder"),
+    ).toMatchObject({ label: "New Folder", enabled: true, shortcut: undefined });
+    expect(
       contextItems(directory, "en").find((item) => item.command === "moveToOther")?.label,
     ).toBe("Move to Right Pane");
     const file = captureMenu({ ...context, entries: [{ ...entry, kind: "file" }] }, 20, 30);

@@ -1,11 +1,12 @@
 use panedeck_app::{
     AppServices, BrowseErrorDto, CancelOperationRequestDto, CleanupRecoveryRequestDto,
-    ClipboardErrorDto, ClipboardStateDto, CreateDirectoryRequestDto, DiagnosticExportRequestDto,
-    DiagnosticPreviewDto, DirectoryListingDto, HoldTreeNodeRequestDto, LocalLocationsDto,
-    NavigateChildRequestDto, NavigateDirectoryRequestDto, NavigateKnownRequestDto,
-    OperationErrorDto, OperationItemOutcomeDto, OperationJobDto, PasteDraftDto,
-    PasteDraftRequestDto, PasteItemCompletion, PreparePasteRequestDto, ReadTreeNodeRequestDto,
-    RecoveryItemDto, RenameRequestDto, ResolveConflictRequestDto, SetClipboardRequestDto,
+    ClipboardErrorDto, ClipboardStateDto, CreateChildDirectoryRequestDto,
+    CreateDirectoryRequestDto, DiagnosticExportRequestDto, DiagnosticPreviewDto,
+    DirectoryListingDto, HoldTreeNodeRequestDto, LocalLocationsDto, NavigateChildRequestDto,
+    NavigateDirectoryRequestDto, NavigateKnownRequestDto, OperationErrorDto,
+    OperationItemOutcomeDto, OperationJobDto, PasteDraftDto, PasteDraftRequestDto,
+    PasteItemCompletion, PreparePasteRequestDto, ReadTreeNodeRequestDto, RecoveryItemDto,
+    RenameRequestDto, ResolveConflictRequestDto, SetClipboardRequestDto,
     StopDirectoryWatchRequestDto, TransferRequestDto, TrashRequestDto, TreeNodeRequestDto,
     WatchDirectoryRequestDto,
 };
@@ -187,6 +188,16 @@ fn create_directory(
 }
 
 #[tauri::command]
+fn create_child_directory(
+    state: tauri::State<'_, AppServices>,
+    request: CreateChildDirectoryRequestDto,
+) -> Result<OperationJobDto, OperationErrorDto> {
+    state
+        .operations()
+        .create_child_directory(state.browser(), request)
+}
+
+#[tauri::command]
 fn trash_entries(
     state: tauri::State<'_, AppServices>,
     request: TrashRequestDto,
@@ -356,6 +367,7 @@ pub fn run() {
             validate_transfer,
             rename_entry,
             create_directory,
+            create_child_directory,
             trash_entries,
             list_operation_jobs,
             operation_log,

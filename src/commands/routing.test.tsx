@@ -47,6 +47,7 @@ async function setup(desktopMenuClient?: DesktopMenuClient) {
     transferToEntry: vi.fn().mockResolvedValue(result),
     rename: vi.fn().mockResolvedValue(result),
     createDirectory: vi.fn().mockResolvedValue(result),
+    createChildDirectory: vi.fn().mockResolvedValue(result),
     trash: vi.fn().mockResolvedValue(result),
     listJobs: vi.fn().mockResolvedValue([]),
     cancel: vi.fn(),
@@ -107,6 +108,33 @@ afterEach(() => {
 });
 
 describe("captured command routing", () => {
+  it("creates inside a right-clicked folder without entering it or following later focus", async () => {
+    const { left, right, operationClient, directoryClient } = await setup();
+    const folder = {
+      ...listing("left").entries[0],
+      kind: "directory" as const,
+      displayName: "parent",
+    };
+    vi.mocked(directoryClient.reopen).mockResolvedValueOnce({
+      ...listing("left"),
+      entries: [folder],
+    });
+    fireEvent.click(within(left).getByRole("button", { name: "Refresh folder" }));
+    await within(left).findByText("parent");
+    fireEvent.contextMenu(within(left).getByText("parent"));
+    fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "New Folder" }));
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByText("Create inside “parent”.")).toBeInTheDocument();
+    fireEvent.focus(right);
+    const name = within(dialog).getByRole("textbox", { name: "Name" });
+    fireEvent.change(name, { target: { value: "child" } });
+    fireEvent.submit(name.closest("form")!);
+    await waitFor(() =>
+      expect(operationClient.createChildDirectory).toHaveBeenCalledWith(folder.reference, "child"),
+    );
+    expect(operationClient.createDirectory).not.toHaveBeenCalled();
+    expect(directoryClient.openChild).not.toHaveBeenCalled();
+  });
   it("keeps right-click multi-selection and original target after focus changes", async () => {
     const { left, right, operationClient } = await setup();
     fireEvent.click(within(left).getByText("left-first.txt"));

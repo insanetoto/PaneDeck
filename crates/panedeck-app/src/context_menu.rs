@@ -117,7 +117,7 @@ impl ContextMenuRequestDto {
         use ContextCommandDto as C;
         let mut commands = Vec::new();
         if self.kind == ContextMenuKindDto::Directory {
-            commands.extend([(C::Open, 0), (C::ToggleFolder, 0)]);
+            commands.extend([(C::Open, 0), (C::ToggleFolder, 0), (C::NewFolder, 0)]);
         }
         if self.kind != ContextMenuKindDto::Blank {
             commands.extend([
@@ -212,6 +212,25 @@ mod tests {
             let items = menu.items();
             assert!(menu.valid());
             assert!(items.windows(2).all(|pair| pair[0].group <= pair[1].group));
+            assert_eq!(
+                items
+                    .iter()
+                    .any(|item| item.command == ContextCommandDto::NewFolder),
+                matches!(
+                    kind,
+                    ContextMenuKindDto::Directory | ContextMenuKindDto::Blank
+                )
+            );
+            if kind == ContextMenuKindDto::Directory {
+                assert_eq!(
+                    items
+                        .iter()
+                        .find(|item| item.command == ContextCommandDto::NewFolder)
+                        .unwrap()
+                        .label,
+                    "New Folder"
+                );
+            }
             assert_eq!(
                 items
                     .iter()

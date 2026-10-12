@@ -102,7 +102,7 @@ button {
 
 .paste-dialog-backdrop {
   position: fixed;
-  z-index: 30;
+  z-index: 50;
   inset: 0;
   display: grid;
   place-items: center;
@@ -317,7 +317,7 @@ button {
 }
 
 .danger-action {
-  color: #c53131;
+  color: var(--color-danger);
 }
 
 .diagnostic-dialog textarea {
@@ -990,4 +990,28 @@ button {
 }
 .operation-log-events code {
   overflow-wrap: anywhere;
+}
+
+/* Keep all actions reachable at 200% zoom and in narrow panes. */
+.feedback-notice,
+.feedback-heading,
+.feedback-actions,
+.paste-dialog-actions {
+  flex-wrap: wrap;
+}
+.feedback-card {
+  min-width: 0;
+}
+.feedback-notice > span {
+  overflow-wrap: anywhere;
+  min-width: 120px;
+}
+.paste-dialog {
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+}
+@media (max-width: 680px) {
+  .feedback-cards {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }

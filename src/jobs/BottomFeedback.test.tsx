@@ -113,6 +113,37 @@ describe("bottom feedback", () => {
     view.unmount();
     input.remove();
   });
+  it("does not announce finished while a split operation awaits its final callback", () => {
+    window.localStorage.setItem(LANGUAGE_STORAGE_KEY, "en");
+    render(
+      <I18nProvider>
+        <BottomFeedback
+          jobs={[
+            job({
+              operationId: "logical",
+              operationState: null,
+              phase: "finished",
+              state: "completed",
+              elapsedMillis: 600,
+              canCancel: false,
+            }),
+          ]}
+          logStatus={[]}
+          connectionFailed={false}
+          notice={null}
+          onDismissNotice={vi.fn()}
+          onCancel={vi.fn()}
+          onReviewConflict={vi.fn()}
+          onLog={vi.fn()}
+          onDiagnostics={vi.fn()}
+        />
+      </I18nProvider>,
+    );
+    expect(screen.queryByText("Finished")).not.toBeInTheDocument();
+    expect(screen.getByText("Preparing")).toBeInTheDocument();
+    expect(screen.getByRole("progressbar")).not.toHaveAttribute("value");
+  });
+
   it("keeps log failure visible with trace and diagnostic actions", () => {
     window.localStorage.setItem(LANGUAGE_STORAGE_KEY, "en");
     const log = vi.fn(),

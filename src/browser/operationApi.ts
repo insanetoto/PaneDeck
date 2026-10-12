@@ -92,6 +92,7 @@ export interface OperationConflict {
 }
 
 export interface OperationClient {
+  createChildDirectory(entry: EntryReference, name: string): Promise<OperationJob>;
   watch?(receive: (snapshot: OperationSnapshot) => void): Promise<() => void>;
   getLog?(): Promise<OperationLogSnapshot>;
   validateTransfer?(
@@ -170,6 +171,8 @@ export async function watchOperations(
   };
 }
 export const tauriOperationClient: OperationClient = {
+  createChildDirectory: (entry, name) =>
+    invoke("create_child_directory", { request: { entry, name } }),
   watch: async (receive) => {
     if (!isTauri()) {
       receive({

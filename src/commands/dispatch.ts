@@ -46,11 +46,22 @@ export function commandEnabled(
   busy = false,
 ): boolean {
   if (busy) return false;
+  if (command === "newFolder" && context.source === "contextMenu")
+    return newFolderParentEntry(context) !== null;
   if (command === "paste" || command === "newFolder") return context.directory !== null;
   if (command === "rename") return context.entries.length === 1;
   if (command === "copyToOther" || command === "moveToOther")
     return context.entries.length > 0 && context.target !== null;
   return context.entries.length > 0;
+}
+
+/** An entry menu creates inside its captured folder; blank/menu/keyboard create at the pane root. */
+export function newFolderParentEntry(context: CommandContext) {
+  return context.source === "contextMenu" &&
+    context.entries.length === 1 &&
+    context.entries[0].kind === "directory"
+    ? context.entries[0]
+    : null;
 }
 
 export function dispatchWrite(
@@ -71,6 +82,9 @@ export function dispatchWrite(
   }
   if (command === "trash") return client.trash(references);
   if (!name?.trim()) return Promise.reject(new Error("empty name"));
+  const parentEntry = newFolderParentEntry(context);
+  if (command === "newFolder" && parentEntry)
+    return client.createChildDirectory(parentEntry.reference, name);
   return command === "rename"
     ? client.rename(references[0], name)
     : client.createDirectory(context.directory!, name);

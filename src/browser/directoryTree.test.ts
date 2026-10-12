@@ -117,6 +117,24 @@ describe("directory tree model", () => {
     expect(client.releaseTreeNode).toHaveBeenCalledTimes(2);
     tree.dispose();
   });
+  it("refreshes cached branch ordering when sorting or root snapshots change", async () => {
+    const { tree, root } = setup();
+    await tree.expand("A");
+    expect(
+      tree
+        .snapshot()
+        .map((row) => row.entry.displayName)
+        .slice(0, 3),
+    ).toEqual(["A", "B", "z"]);
+    tree.update(root, { ...options, sortDirection: "descending" });
+    await vi.waitFor(() =>
+      expect(tree.snapshot().find((row) => row.parentKey === "A")?.entry.displayName).toBe("z"),
+    );
+    tree.update(listing("new", [entry("fresh", "new", "file")]), options);
+    expect(tree.snapshot().map((row) => row.entry.displayName)).toEqual(["fresh"]);
+    tree.dispose();
+  });
+
   it("discards a result delivered after collapse and keeps pane states independent", async () => {
     const { tree, client, root } = setup();
     let finish!: (listing: DirectoryListing) => void;
@@ -195,5 +213,56 @@ describe("expanded branch synchronization", () => {
     expect(tree.snapshot().some((row) => row.key === "Z")).toBe(true);
     expect(tree.snapshot().some((row) => row.key === "renamed")).toBe(false);
     tree.dispose();
+  });
+});
+
+describe("v2 tree resource audit", () => {
+  it("releases holds, watchers and timers over 200 expansion and navigation cycles", async () => {
+    vi.useFakeTimers();
+    const holds = new Set<string>(),
+      watches = new Set<string>();
+    let maximumHolds = 0,
+      maximumWatches = 0;
+    const client: DirectoryClient = {
+      openPath: vi.fn(),
+      openChild: vi.fn(),
+      openParent: vi.fn(),
+      reopen: vi.fn(),
+      holdTreeNode: async (_pane, id) => {
+        holds.add(id);
+        maximumHolds = Math.max(maximumHolds, holds.size);
+      },
+      releaseTreeNode: async (_pane, id) => {
+        holds.delete(id);
+      },
+      readTreeNode: async (id) => listing(id, [entry("child", id)]),
+    };
+    for (let cycle = 0; cycle < 200; cycle++) {
+      const tree = new DirectoryTree(client, listing(`root-${cycle}`, [entry("folder")]), options);
+      tree.start();
+      tree.setMonitor(
+        {
+          start: async (_pane, directory, signal) => {
+            watches.add(directory.sessionId);
+            maximumWatches = Math.max(maximumWatches, watches.size);
+            signal("changed");
+            return () => {
+              watches.delete(directory.sessionId);
+            };
+          },
+        },
+        async () => {},
+        vi.fn(),
+      );
+      await tree.expand("folder");
+      tree.collapse("folder");
+      tree.dispose();
+      await Promise.resolve();
+      expect(holds.size).toBe(0);
+      expect(watches.size).toBe(0);
+      expect(vi.getTimerCount()).toBe(0);
+    }
+    expect(maximumHolds).toBeLessThanOrEqual(2);
+    expect(maximumWatches).toBeLessThanOrEqual(2);
   });
 });

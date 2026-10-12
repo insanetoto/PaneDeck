@@ -42,6 +42,19 @@ function Harness({ items }: { items: EntrySnapshot[] }) {
 describe("virtual file list", () => {
   afterEach(cleanup);
 
+  it("never exposes an active descendant whose virtual row was unmounted", () => {
+    const view = render(<Harness items={entries(10_000)} />);
+    const viewport = view.container.querySelector<HTMLElement>(".file-list-viewport")!;
+    fireEvent.keyDown(viewport, { key: "ArrowDown" });
+    const id = viewport.getAttribute("aria-activedescendant")!;
+    expect(document.getElementById(id)).not.toBeNull();
+    viewport.scrollTop = 240_000;
+    fireEvent.scroll(viewport);
+    expect(document.getElementById(id)).toBeNull();
+    expect(viewport).not.toHaveAttribute("aria-activedescendant");
+    expect(screen.getAllByRole("row").length).toBeLessThan(40);
+  });
+
   it("renders only a bounded window for ten thousand entries", () => {
     render(<Harness items={entries(10_000)} />);
     expect(screen.getAllByRole("row").length).toBeLessThan(40);
