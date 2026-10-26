@@ -30,11 +30,11 @@
 
 ```bash
 npm run build
-mkdir -p /tmp/PaneDeck.app/Contents/MacOS
-cp target/release/panedeck /tmp/PaneDeck.app/Contents/MacOS/PaneDeck
+mkdir -p .tmp/PaneDeck.app/Contents/MacOS
+cp target/release/panedeck .tmp/PaneDeck.app/Contents/MacOS/PaneDeck
 # Info.plist：CFBundleIdentifier=dev.panedeck.desktop，LSMinimumSystemVersion=14.0
-codesign --force --deep --sign - /tmp/PaneDeck.app
-open -n /tmp/PaneDeck.app
+codesign --force --deep --sign - .tmp/PaneDeck.app
+open -n .tmp/PaneDeck.app
 ```
 
 注意：

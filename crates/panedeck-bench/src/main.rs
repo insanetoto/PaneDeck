@@ -23,8 +23,15 @@ impl BenchmarkFixture {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let root =
-            env::temp_dir().join(format!("panedeck-benchmark-{}-{nonce}", std::process::id()));
+        let project = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        let root = project
+            .join(".tmp")
+            .join("bench")
+            .join(format!("panedeck-benchmark-{}-{nonce}", std::process::id()));
+        fs::create_dir_all(root.parent().unwrap_or(&root))?;
         fs::create_dir(&root)?;
         Ok(Self(root))
     }
@@ -32,8 +39,8 @@ impl BenchmarkFixture {
 
 impl Drop for BenchmarkFixture {
     fn drop(&mut self) {
-        // The path is created by this process beneath the OS temp directory and
-        // never accepts user input.
+        // The path is created by this process beneath the project-local .tmp
+        // directory and never accepts user input.
         let _ = fs::remove_dir_all(&self.0);
     }
 }

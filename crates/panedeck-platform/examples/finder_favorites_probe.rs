@@ -5,7 +5,7 @@
 //! the real user list:
 //! `cargo build -p panedeck-platform --example finder_favorites_probe`
 //! then place `target/debug/examples/finder_favorites_probe` in an `.app` and
-//! launch it with `open --args /tmp/finder-probe.txt`.
+//! launch it with `open --args <project>/.tmp/finder-probe.txt`.
 
 use panedeck_platform::{FinderFavoritesAdapter, FinderFavoritesDiscovery};
 
@@ -26,9 +26,23 @@ fn main() {
             favorite.path.display()
         ));
     }
-    let path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "/tmp/panedeck-finder-probe.txt".to_owned());
+    let path = std::env::args().nth(1).unwrap_or_else(|| {
+        let project = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .map_or_else(
+                || std::path::PathBuf::from("."),
+                std::path::Path::to_path_buf,
+            );
+        project
+            .join(".tmp")
+            .join("finder-favorites-probe.txt")
+            .to_string_lossy()
+            .into_owned()
+    });
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let _ = std::fs::write(&path, &output);
     print!("{output}");
 }
