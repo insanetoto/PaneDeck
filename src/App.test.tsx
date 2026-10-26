@@ -745,13 +745,15 @@ describe("pane navigation", () => {
     expect(screen.getByRole("button", { name: "Back" })).toBeDisabled();
   });
 
-  it("warns when Finder visibility cannot be read without Full Disk Access", () => {
+  it("prompts for Finder permission only when refreshing without visibility", () => {
     const client: DirectoryClient = {
       openPath: vi.fn(),
       openChild: vi.fn(),
       openParent: vi.fn(),
       reopen: vi.fn(),
     };
+    const refresh = vi.fn();
+    const openSettings = vi.fn();
     render(
       <I18nProvider>
         <FilePane
@@ -760,13 +762,24 @@ describe("pane navigation", () => {
           finderVisibilityAvailable={false}
           id="left"
           onActivate={vi.fn()}
+          onOpenFinderSettings={openSettings}
+          onRefreshFavorites={refresh}
           paneRef={createRef<HTMLElement>()}
         />
       </I18nProvider>,
     );
-    expect(
-      screen.getByText(/Finder visibility is unavailable \(Full Disk Access required\)/),
-    ).toBeInTheDocument();
+
+    expect(screen.queryByText(/Finder visibility is unavailable/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh favorites" }));
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(screen.getByRole("dialog")).toHaveTextContent("Finder favorites need permission");
+    fireEvent.click(screen.getByRole("button", { name: "Open System Settings" }));
+    expect(openSettings).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh favorites" }));
+    fireEvent.click(screen.getByRole("button", { name: "Not now" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   it("keeps per-pane column widths when locations refresh", async () => {

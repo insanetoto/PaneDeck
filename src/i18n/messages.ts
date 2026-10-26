@@ -57,9 +57,12 @@ export const enMessages = {
   "feedback.phase.finished": "Finished",
   "favorite.warning.timeout": "Finder favorites refresh timed out; showing the last list.",
   "favorite.warning.unavailable": "Finder favorites could not be read.",
-  "favorite.warning.visibility":
-    "Finder visibility is unavailable (Full Disk Access required); shared favorites are hidden to avoid showing items Finder does not display.",
   "favorite.warning.unresolved": "Unresolved Finder favorites: {count}",
+  "finderPermission.title": "Finder favorites need permission",
+  "finderPermission.message":
+    "PaneDeck needs Full Disk Access to know which Finder favorites are visible. Grant it in System Settings → Privacy & Security → Full Disk Access. If you decline, Finder shared favorites stay hidden.",
+  "finderPermission.cancel": "Not now",
+  "finderPermission.openSettings": "Open System Settings",
   "uninstall.title": "Uninstall PaneDeck",
   "uninstall.description":
     "Review what will be removed. App data is permanently deleted; the application bundle is moved to the Trash.",
@@ -304,9 +307,12 @@ export const zhCNMessages: Record<MessageKey, string> = {
   "feedback.phase.finished": "已结束",
   "favorite.warning.timeout": "访达收藏刷新超时，显示上次结果。",
   "favorite.warning.unavailable": "无法读取访达收藏。",
-  "favorite.warning.visibility":
-    "无法读取访达可见性（需要完全磁盘访问），为避免显示 Finder 未显示的项目，已隐藏共享收藏。",
   "favorite.warning.unresolved": "无法解析的访达收藏：{count}",
+  "finderPermission.title": "访达收藏需要权限",
+  "finderPermission.message":
+    "PaneDeck 需要完全磁盘访问权限才能判断哪些访达收藏可见。请在“系统设置 → 隐私与安全性 → 完全磁盘访问”中授权；不授权时访达共享收藏将保持隐藏。",
+  "finderPermission.cancel": "暂不",
+  "finderPermission.openSettings": "打开系统设置",
   "uninstall.title": "卸载 PaneDeck",
   "uninstall.description": "请确认将要删除的内容。应用数据会被永久删除，应用包会移到废纸篓。",
   "uninstall.loading": "正在读取应用数据…",

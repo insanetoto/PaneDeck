@@ -70,6 +70,22 @@ fn uninstall_app(
 fn quit_app(app: AppHandle) {
     app.exit(0);
 }
+
+#[tauri::command]
+fn open_full_disk_access_settings() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("/usr/bin/open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+            .status()
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("Full Disk Access is only available on macOS".to_owned())
+    }
+}
 #[tauri::command]
 async fn read_tree_node(
     state: tauri::State<'_, AppServices>,
@@ -432,6 +448,7 @@ pub fn run() {
             preview_uninstall,
             uninstall_app,
             quit_app,
+            open_full_disk_access_settings,
             open_directory,
             open_child_directory,
             open_parent_directory,

@@ -86,6 +86,7 @@ import { useLocalLocations } from "./browser/useLocalLocations";
 import { useLocationsChanged } from "./browser/useLocationsChanged";
 import { VirtualFileList } from "./browser/VirtualFileList";
 import { tauriUninstallClient } from "./browser/uninstallApi";
+import { openFullDiskAccessSettings } from "./browser/finderAccessApi";
 import { UninstallDialog } from "./uninstall/UninstallDialog";
 import {
   tauriClipboardClient,
@@ -134,6 +135,7 @@ interface FilePaneProps {
   finderUnresolved?: number;
   finderVisibilityAvailable?: boolean;
   onRefreshFavorites?: () => void;
+  onOpenFinderSettings?: () => void;
   onRefreshLocations?: () => void;
   onAddFavorite?: (favorite: LocalFavorite) => void;
   onRemoveFavorite?: (path: string) => void;
@@ -187,6 +189,7 @@ export function FilePane({
   finderUnresolved = 0,
   finderVisibilityAvailable = true,
   onRefreshFavorites,
+  onOpenFinderSettings,
   onRefreshLocations,
   onAddFavorite,
   onRemoveFavorite,
@@ -408,6 +411,7 @@ export function FilePane({
     ? favorites.find((favorite) => favorite.path === current.displayPath)
     : undefined;
   const [selectedSidebar, setSelectedSidebar] = useState<string | null>(null);
+  const [finderPermissionPrompt, setFinderPermissionPrompt] = useState(false);
   const standardLocations = locations.filter((location) => location.source === "standard");
   const positionLocations = locations.filter((location) => location.source !== "standard");
   const currentStandardLocation = current
@@ -636,7 +640,10 @@ export function FilePane({
             <button
               aria-label={t("location.refreshFavorites")}
               className="sidebar-refresh"
-              onClick={() => onRefreshFavorites?.()}
+              onClick={() => {
+                onRefreshFavorites?.();
+                if (!finderVisibilityAvailable) setFinderPermissionPrompt(true);
+              }}
               type="button"
             >
               ↻
@@ -720,9 +727,40 @@ export function FilePane({
               {t("favorite.warning.timeout")}
             </div>
           ) : null}
-          {!finderVisibilityAvailable ? (
-            <div className="location-warning" role="status">
-              {t("favorite.warning.visibility")}
+          {finderPermissionPrompt && !finderVisibilityAvailable ? (
+            <div
+              className="paste-dialog-backdrop"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="finder-permission-title"
+            >
+              <section className="paste-dialog">
+                <header>
+                  <h2 id="finder-permission-title">{t("finderPermission.title")}</h2>
+                  <button
+                    aria-label={t("feedback.dismiss")}
+                    onClick={() => setFinderPermissionPrompt(false)}
+                    type="button"
+                  >
+                    ×
+                  </button>
+                </header>
+                <p>{t("finderPermission.message")}</p>
+                <footer className="paste-dialog-actions">
+                  <button onClick={() => setFinderPermissionPrompt(false)} type="button">
+                    {t("finderPermission.cancel")}
+                  </button>
+                  <button
+                    onClick={() => {
+                      onOpenFinderSettings?.();
+                      setFinderPermissionPrompt(false);
+                    }}
+                    type="button"
+                  >
+                    {t("finderPermission.openSettings")}
+                  </button>
+                </footer>
+              </section>
             </div>
           ) : null}
           <div className="sidebar-heading">
@@ -1548,6 +1586,7 @@ function App({
           finderTimedOut={finderFavorites.timedOut}
           finderUnresolved={finderFavorites.unresolved}
           finderVisibilityAvailable={finderFavorites.visibilityAvailable}
+          onOpenFinderSettings={() => void openFullDiskAccessSettings()}
           id="left"
           onBrowseControls={(controls) => updateBrowseControls("left", controls)}
           locationWarnings={locationWarnings}
@@ -1641,6 +1680,7 @@ function App({
           finderTimedOut={finderFavorites.timedOut}
           finderUnresolved={finderFavorites.unresolved}
           finderVisibilityAvailable={finderFavorites.visibilityAvailable}
+          onOpenFinderSettings={() => void openFullDiskAccessSettings()}
           id="right"
           onBrowseControls={(controls) => updateBrowseControls("right", controls)}
           locationWarnings={locationWarnings}
