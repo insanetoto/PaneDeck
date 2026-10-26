@@ -36,11 +36,11 @@ describe("language foundation", () => {
       </I18nProvider>,
     );
 
-    expect(screen.getByText("左窗格")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "左窗格" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "EN" }));
 
-    expect(screen.getByText("Left pane")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Left pane" })).toBeInTheDocument();
     expect(document.documentElement).toHaveAttribute("lang", "en");
     expect(window.localStorage.getItem(LANGUAGE_STORAGE_KEY)).toBe("en");
   });

@@ -85,7 +85,7 @@ async function setup(desktopMenuClient?: DesktopMenuClient) {
         directoryClient={directoryClient}
         operationClient={operationClient}
         clipboardClient={clipboardClient}
-        locationsClient={{ list: async () => ({ locations: [], volumeScanFailed: false }) }}
+        locationsClient={{ list: async () => ({ locations: [], warnings: [] }) }}
       />
     </I18nProvider>,
   );

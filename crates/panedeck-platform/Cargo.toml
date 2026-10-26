@@ -10,8 +10,10 @@ panedeck-fs = { path = "../panedeck-fs" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSPasteboard", "NSPasteboardItem"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSArray", "NSError", "NSFileManager", "NSString", "NSURL", "std"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSBitmapImageRep", "NSImage", "NSImageRep", "NSPasteboard", "NSPasteboardItem", "NSWorkspace"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSArray", "NSData", "NSDictionary", "NSError", "NSFileManager", "NSCoder", "NSKeyedArchiver", "NSNotification", "NSOperation", "NSString", "NSURL", "NSValue", "block2", "std"] }
+block2 = "0.6.2"
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3"

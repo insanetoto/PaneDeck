@@ -25,6 +25,7 @@ import {
   type RefObject,
 } from "react";
 import "./App.css";
+import productIcon from "../src-tauri/icons/icon.png";
 import {
   tauriDesktopMenuClient,
   useDesktopMenu,
@@ -65,15 +66,27 @@ import { tauriDirectoryMonitor, type DirectoryMonitor } from "./browser/director
 import {
   favoriteForPath,
   loadFavorites,
+  mergeFavorites,
   saveFavorites,
   type LocalFavorite,
+  type SidebarFavorite,
 } from "./browser/favorites";
 import {
   tauriLocalLocationsClient,
   type LocalLocation,
   type LocalLocationsClient,
+  type LocalLocationWarning,
 } from "./browser/locationsApi";
+import {
+  tauriFinderFavoritesClient,
+  type FinderFavoritesClient,
+} from "./browser/finderFavoritesApi";
+import { useFinderFavorites } from "./browser/useFinderFavorites";
+import { useLocalLocations } from "./browser/useLocalLocations";
+import { useLocationsChanged } from "./browser/useLocationsChanged";
 import { VirtualFileList } from "./browser/VirtualFileList";
+import { tauriUninstallClient } from "./browser/uninstallApi";
+import { UninstallDialog } from "./uninstall/UninstallDialog";
 import {
   tauriClipboardClient,
   type ClipboardClient,
@@ -112,8 +125,16 @@ interface FilePaneProps {
   onActivate: (id: PaneId) => void;
   paneRef: RefObject<HTMLElement | null>;
   monitor?: DirectoryMonitor;
+  locationWarnings?: LocalLocationWarning[];
   locations?: LocalLocation[];
-  favorites?: LocalFavorite[];
+  locationsLoading?: boolean;
+  favorites?: SidebarFavorite[];
+  finderFailed?: boolean;
+  finderTimedOut?: boolean;
+  finderUnresolved?: number;
+  finderVisibilityAvailable?: boolean;
+  onRefreshFavorites?: () => void;
+  onRefreshLocations?: () => void;
   onAddFavorite?: (favorite: LocalFavorite) => void;
   onRemoveFavorite?: (path: string) => void;
   onDirectoryChange?: (listing: DirectoryListing | null) => void;
@@ -143,6 +164,13 @@ interface FilePaneProps {
   }) => void;
 }
 
+function opensOnSingleClick(location: LocalLocation) {
+  return (
+    location.source === "standard" &&
+    (location.kind === "desktop" || location.kind === "downloads" || location.kind === "documents")
+  );
+}
+
 export function FilePane({
   active,
   client,
@@ -150,8 +178,16 @@ export function FilePane({
   onActivate,
   paneRef,
   monitor,
+  locationWarnings = [],
   locations = [],
+  locationsLoading = false,
   favorites = [],
+  finderFailed = false,
+  finderTimedOut = false,
+  finderUnresolved = 0,
+  finderVisibilityAvailable = true,
+  onRefreshFavorites,
+  onRefreshLocations,
   onAddFavorite,
   onRemoveFavorite,
   onDirectoryChange,
@@ -368,11 +404,60 @@ export function FilePane({
   }, [validateDrop]);
   useEffect(() => () => paneDrag.clear(), [paneDrag, dragToken, current?.directory.sessionId]);
   const [paneDropInvalid, setPaneDropInvalid] = useState<string | null>(null);
-  const currentIsFavorite = current
-    ? favorites.some((favorite) => favorite.path === current.displayPath)
-    : false;
+  const currentFavorite = current
+    ? favorites.find((favorite) => favorite.path === current.displayPath)
+    : undefined;
+  const [selectedSidebar, setSelectedSidebar] = useState<string | null>(null);
+  const standardLocations = locations.filter((location) => location.source === "standard");
+  const positionLocations = locations.filter((location) => location.source !== "standard");
+  const currentStandardLocation = current
+    ? standardLocations.find((location) => location.path === current.displayPath)
+    : undefined;
+  const currentIsFavorite = Boolean(currentFavorite || currentStandardLocation);
+  const currentIsAppFavorite = currentFavorite?.source === "app";
   const locationName = (location: LocalLocation) =>
-    location.kind === "volume" ? location.name : t(`location.${location.kind}` as MessageKey);
+    location.source === "standard" ? t(`location.${location.kind}` as MessageKey) : location.name;
+  const locationIcon = (kind: LocalLocation["kind"]) => {
+    switch (kind) {
+      case "home":
+        return "⌂";
+      case "desktop":
+      case "documents":
+        return "▤";
+      case "downloads":
+        return "⇩";
+      case "iCloudDrive":
+        return "☁";
+      case "cloudStorage":
+        return "▣";
+      case "localVolume":
+        return "◫";
+      case "externalVolume":
+        return "▯";
+      case "networkVolume":
+        return "⇄";
+    }
+  };
+  const openLocation = (location: LocalLocation) => {
+    onActivate(id);
+    void openPath(location.path);
+  };
+  const openFavorite = (favorite: LocalFavorite) => {
+    onActivate(id);
+    void openPath(favorite.path);
+  };
+  const activateOnKey = (event: ReactKeyboardEvent<HTMLButtonElement>, open: () => void) => {
+    if (event.key !== "Enter" && !(event.metaKey && event.key === "ArrowDown")) return;
+    event.preventDefault();
+    onActivate(id);
+    open();
+  };
+  const selectSidebar = (key: string) => {
+    onActivate(id);
+    setSelectedSidebar(key);
+  };
+  const unavailableSuffix = (available: boolean) =>
+    available ? "" : ` — ${t("location.unavailable")}`;
 
   return (
     <section
@@ -434,7 +519,15 @@ export function FilePane({
     >
       <header className="pane-navigation">
         <div className="pane-identity">
-          <span className="pane-side-label">{paneName}</span>
+          <img
+            className="pane-product-icon"
+            src={productIcon}
+            alt=""
+            aria-hidden="true"
+            width="24"
+            height="24"
+            draggable={false}
+          />
         </div>
         <div aria-label={t("pane.navigationActions")} className="navigation-actions">
           <button
@@ -501,14 +594,22 @@ export function FilePane({
           <span>{t("pane.hidden")}</span>
         </button>
         <button
-          aria-label={currentIsFavorite ? t("location.removeFavorite") : t("location.addFavorite")}
+          aria-label={
+            currentStandardLocation
+              ? t("location.standardFavorite")
+              : currentFavorite && !currentIsAppFavorite
+                ? t("location.finderFavorite")
+                : currentIsFavorite
+                  ? t("location.removeFavorite")
+                  : t("location.addFavorite")
+          }
           aria-pressed={currentIsFavorite}
           className="favorite-toggle"
-          disabled={!current}
+          disabled={!current || (currentIsFavorite && !currentIsAppFavorite)}
           onClick={() => {
             if (!current) return;
-            if (currentIsFavorite) onRemoveFavorite?.(current.displayPath);
-            else onAddFavorite?.(favoriteForPath(current.displayPath));
+            if (currentIsAppFavorite) onRemoveFavorite?.(current.displayPath);
+            else if (!currentIsFavorite) onAddFavorite?.(favoriteForPath(current.displayPath));
           }}
           type="button"
         >
@@ -525,72 +626,155 @@ export function FilePane({
       </nav>
 
       <div className="pane-body">
-        <aside aria-label={t("location.sidebar")} className="location-sidebar">
-          <strong>{t("location.local")}</strong>
-          <div className="location-list">
-            {locations
-              .filter((location) => location.kind !== "volume")
-              .map((location) => (
+        <aside
+          aria-busy={locationsLoading}
+          aria-label={t("location.sidebar")}
+          className="location-sidebar"
+        >
+          <div className="sidebar-heading">
+            <strong>{t("location.favorites")}</strong>
+            <button
+              aria-label={t("location.refreshFavorites")}
+              className="sidebar-refresh"
+              onClick={() => onRefreshFavorites?.()}
+              type="button"
+            >
+              ↻
+            </button>
+          </div>
+          <div className="location-list favorite-list">
+            {standardLocations.map((location) => {
+              const key = `location:${location.id}`;
+              return (
                 <button
-                  disabled={!location.available || loading}
-                  key={location.id}
-                  onClick={() => void openPath(location.path)}
-                  title={location.path}
+                  aria-pressed={selectedSidebar === key}
+                  data-unavailable={!location.available || undefined}
+                  key={key}
+                  onClick={(event) => {
+                    selectSidebar(key);
+                    if (opensOnSingleClick(location) && event.detail <= 1) {
+                      openLocation(location);
+                    }
+                  }}
+                  onDoubleClick={() => {
+                    if (!opensOnSingleClick(location)) openLocation(location);
+                  }}
+                  onKeyDown={(event) => activateOnKey(event, () => openLocation(location))}
+                  title={`${location.path}${unavailableSuffix(location.available)}`}
                   type="button"
                 >
-                  <span aria-hidden="true">⌂</span>
-                  {locationName(location)}
+                  <span aria-hidden="true">{locationIcon(location.kind)}</span>
+                  <span className="sidebar-label">{locationName(location)}</span>
                 </button>
-              ))}
-          </div>
-          {locations.some((location) => location.kind === "volume") ? (
-            <>
-              <strong>{t("location.volumes")}</strong>
-              <div className="location-list">
-                {locations
-                  .filter((location) => location.kind === "volume")
-                  .map((location) => (
-                    <button
-                      disabled={!location.available || loading}
-                      key={location.id}
-                      onClick={() => void openPath(location.path)}
-                      title={location.path}
-                      type="button"
-                    >
-                      <span aria-hidden="true">◫</span>
-                      {locationName(location)}
-                    </button>
-                  ))}
-              </div>
-            </>
-          ) : null}
-          <strong>{t("location.favorites")}</strong>
-          <div className="location-list favorite-list">
-            {favorites.length ? (
-              favorites.map((favorite) => (
-                <div className="favorite-row" key={favorite.path}>
+              );
+            })}
+            {favorites.map((favorite) => {
+              const key = `favorite:${favorite.path}`;
+              return (
+                <div
+                  className={
+                    favorite.source === "app" ? "favorite-row" : "favorite-row system-favorite"
+                  }
+                  key={key}
+                >
                   <button
-                    disabled={loading}
-                    onClick={() => void openPath(favorite.path)}
-                    title={favorite.path}
+                    aria-pressed={selectedSidebar === key}
+                    data-unavailable={!favorite.available || undefined}
+                    onClick={() => selectSidebar(key)}
+                    onDoubleClick={() => openFavorite(favorite)}
+                    onKeyDown={(event) => activateOnKey(event, () => openFavorite(favorite))}
+                    title={`${favorite.path}${unavailableSuffix(favorite.available)}`}
                     type="button"
                   >
                     <span aria-hidden="true">★</span>
-                    {favorite.name}
+                    <span className="sidebar-label">{favorite.name}</span>
                   </button>
-                  <button
-                    aria-label={`${t("location.removeFavorite")}: ${favorite.name}`}
-                    onClick={() => onRemoveFavorite?.(favorite.path)}
-                    type="button"
-                  >
-                    ×
-                  </button>
+                  {favorite.source === "app" ? (
+                    <button
+                      aria-label={`${t("location.removeFavorite")}: ${favorite.name}`}
+                      onClick={() => onRemoveFavorite?.(favorite.path)}
+                      type="button"
+                    >
+                      ×
+                    </button>
+                  ) : null}
                 </div>
-              ))
-            ) : (
+              );
+            })}
+            {!standardLocations.length && !favorites.length ? (
               <span className="no-favorites">{t("location.noFavorites")}</span>
-            )}
+            ) : null}
           </div>
+          {finderFailed ? (
+            <div className="location-warning" role="status">
+              {t("favorite.warning.unavailable")}
+            </div>
+          ) : null}
+          {finderUnresolved > 0 ? (
+            <div className="location-warning" role="status">
+              {t("favorite.warning.unresolved").replace("{count}", String(finderUnresolved))}
+            </div>
+          ) : null}
+          {finderTimedOut ? (
+            <div className="location-warning" role="status">
+              {t("favorite.warning.timeout")}
+            </div>
+          ) : null}
+          {!finderVisibilityAvailable ? (
+            <div className="location-warning" role="status">
+              {t("favorite.warning.visibility")}
+            </div>
+          ) : null}
+          <div className="sidebar-heading">
+            <strong>{t("location.positions")}</strong>
+            <button
+              aria-label={t("location.refresh")}
+              className="sidebar-refresh"
+              onClick={() => onRefreshLocations?.()}
+              type="button"
+            >
+              ↻
+            </button>
+          </div>
+          <div className="location-list">
+            {positionLocations.map((location) => {
+              const key = `location:${location.id}`;
+              return (
+                <button
+                  aria-pressed={selectedSidebar === key}
+                  data-unavailable={!location.available || undefined}
+                  key={key}
+                  onClick={(event) => {
+                    selectSidebar(key);
+                    if (opensOnSingleClick(location) && event.detail <= 1) {
+                      openLocation(location);
+                    }
+                  }}
+                  onDoubleClick={() => {
+                    if (!opensOnSingleClick(location)) openLocation(location);
+                  }}
+                  onKeyDown={(event) => activateOnKey(event, () => openLocation(location))}
+                  title={`${location.path}${unavailableSuffix(location.available)}`}
+                  type="button"
+                >
+                  <span aria-hidden="true">{locationIcon(location.kind)}</span>
+                  <span className="sidebar-label">{locationName(location)}</span>
+                </button>
+              );
+            })}
+            {!positionLocations.length ? (
+              <span className="no-favorites">
+                {locationsLoading ? t("location.loading") : t("location.noPositions")}
+              </span>
+            ) : null}
+          </div>
+          {locationWarnings.length ? (
+            <div aria-live="polite" className="location-warning" role="status">
+              {locationWarnings.map((warning) => (
+                <span key={warning}>{t(`location.warning.${warning}` as MessageKey)}</span>
+              ))}
+            </div>
+          ) : null}
         </aside>
 
         <div
@@ -626,10 +810,23 @@ export function FilePane({
             <div className="empty-pane-state" role="status">
               <strong>{t("pane.loading")}</strong>
             </div>
-          ) : current && current.entries.length > 0 ? (
+          ) : current ? (
             <VirtualFileList
               cutEntryKeys={cutEntryKeys}
+              emptyState={
+                current.entries.length === 0 ? (
+                  <div className="empty-pane-state">
+                    <span aria-hidden="true" className="empty-folder-icon">
+                      ▱
+                    </span>
+                    <strong>{t("pane.emptyDirectory")}</strong>
+                    <span>{t("pane.emptyDirectoryDescription")}</span>
+                  </div>
+                ) : undefined
+              }
               entries={current.entries}
+              loadIcon={(entry) => client.readEntryIcon?.(entry.reference) ?? Promise.resolve("")}
+              pane={id}
               treeRows={treeRows}
               onToggleTree={(key) => {
                 const row = treeRows.find((row) => row.key === key);
@@ -670,7 +867,7 @@ export function FilePane({
               sortDirection={sortDirection}
               sortField={sortField}
             />
-          ) : !current && browseError ? (
+          ) : browseError ? (
             <div className="empty-pane-state error-state">
               <strong>{t("error.title")}</strong>
             </div>
@@ -679,10 +876,8 @@ export function FilePane({
               <span aria-hidden="true" className="empty-folder-icon">
                 ▱
               </span>
-              <strong>{current ? t("pane.emptyDirectory") : t("pane.emptyTitle")}</strong>
-              <span>
-                {current ? t("pane.emptyDirectoryDescription") : t("pane.emptyDescription")}
-              </span>
+              <strong>{t("pane.emptyTitle")}</strong>
+              <span>{t("pane.emptyDescription")}</span>
             </div>
           )}
         </div>
@@ -713,6 +908,7 @@ interface AppProps {
   desktopMenuClient?: DesktopMenuClient;
   clipboardClient?: ClipboardClient;
   directoryClient?: DirectoryClient;
+  finderFavoritesClient?: FinderFavoritesClient;
   locationsClient?: LocalLocationsClient;
   monitor?: DirectoryMonitor;
   operationClient?: OperationClient;
@@ -725,6 +921,7 @@ function App({
   desktopMenuClient = tauriDesktopMenuClient,
   clipboardClient = tauriClipboardClient,
   directoryClient = tauriDirectoryClient,
+  finderFavoritesClient = tauriFinderFavoritesClient,
   locationsClient = tauriLocalLocationsClient,
   monitor = tauriDirectoryMonitor,
   operationClient = tauriOperationClient,
@@ -749,8 +946,38 @@ function App({
   >({});
   const [activePane, setActivePane] = useState<PaneId>("left");
   const [splitPercent, setSplitPercent] = useState(50);
-  const [locations, setLocations] = useState<LocalLocation[]>([]);
+  const {
+    locations,
+    warnings: locationWarnings,
+    loading: locationsLoading,
+    refresh: refreshLocations,
+  } = useLocalLocations(locationsClient);
   const [favorites, setFavorites] = useState<LocalFavorite[]>(() => loadFavorites());
+  const finderFavorites = useFinderFavorites(finderFavoritesClient);
+  const refreshFinderFavorites = finderFavorites.refresh;
+  useLocationsChanged(
+    useCallback(() => {
+      refreshLocations();
+      refreshFinderFavorites();
+    }, [refreshLocations, refreshFinderFavorites]),
+  );
+  const standardPaths = useMemo(
+    () =>
+      new Set(
+        locations
+          .filter((location) => location.source === "standard")
+          .map((location) => location.path),
+      ),
+    [locations],
+  );
+  const mergedFavorites = useMemo(
+    () =>
+      mergeFavorites(
+        finderFavorites.favorites.filter((favorite) => !standardPaths.has(favorite.path)),
+        favorites.filter((favorite) => !standardPaths.has(favorite.path)),
+      ),
+    [finderFavorites.favorites, favorites, standardPaths],
+  );
   const [paneListings, setPaneListings] = useState<Record<PaneId, DirectoryListing | null>>({
     left: null,
     right: null,
@@ -768,6 +995,7 @@ function App({
     data: OperationLogSnapshot;
     operationId?: string;
   } | null>(null);
+  const [uninstallOpen, setUninstallOpen] = useState(false);
   const [logStatus, setLogStatus] = useState<LogStatus[]>([]);
   const [connectionFailed, setConnectionFailed] = useState(false);
   const [deferredConflicts, setDeferredConflicts] = useState<Set<number>>(new Set());
@@ -830,21 +1058,6 @@ function App({
   );
 
   useEffect(() => {
-    let disposed = false;
-    void locationsClient
-      .list()
-      .then((result) => {
-        if (!disposed) setLocations(result.locations);
-      })
-      .catch(() => {
-        if (!disposed) setLocations([]);
-      });
-    return () => {
-      disposed = true;
-    };
-  }, [locationsClient]);
-
-  useEffect(() => {
     void recoveryClient
       .list()
       .then(setRecoveryItems)
@@ -905,7 +1118,13 @@ function App({
   };
 
   const addFavorite = (favorite: LocalFavorite) => {
-    if (favorites.some((existing) => existing.path === favorite.path)) return;
+    if (
+      mergedFavorites.some((existing) => existing.path === favorite.path) ||
+      locations.some(
+        (location) => location.source === "standard" && location.path === favorite.path,
+      )
+    )
+      return;
     updateFavorites([...favorites, favorite]);
   };
 
@@ -929,7 +1148,10 @@ function App({
     setSplitPercent(Math.min(MAX_SPLIT_PERCENT, Math.max(MIN_SPLIT_PERCENT, requested)));
   };
 
-  const workspaceStyle = { "--left-pane-width": `${splitPercent}%` } as CSSProperties;
+  const workspaceStyle = {
+    "--left-pane-width": `${splitPercent}fr`,
+    "--right-pane-width": `${100 - splitPercent}fr`,
+  } as CSSProperties;
   const cutEntryKeys = new Set(
     clipboardState?.cutEntries.map((reference) => `${reference.sessionId}:${reference.entryId}`) ??
       [],
@@ -1223,11 +1445,11 @@ function App({
       ? pendingConflict
       : null);
   const modalOpen = Boolean(
-    commandDialog || pasteDraft || diagnosticPreview || visibleConflict || logView,
+    commandDialog || pasteDraft || diagnosticPreview || visibleConflict || logView || uninstallOpen,
   );
   const menuPresentation = useMemo<DesktopMenuPresentation>(() => {
     const enabledCommands: DesktopCommand[] = ["languageEnglish", "languageChinese"];
-    if (!modalOpen) enabledCommands.push("diagnostics", "operationLog");
+    if (!modalOpen) enabledCommands.push("diagnostics", "operationLog", "uninstall");
     if (!textEditing && !modalOpen) {
       for (const command of [
         "copyToOther",
@@ -1254,6 +1476,7 @@ function App({
         setLanguage(command === "languageEnglish" ? "en" : "zh-CN");
       } else if (command === "diagnostics") openDiagnostics();
       else if (command === "operationLog") openLog();
+      else if (command === "uninstall") setUninstallOpen(true);
       else if (command === "refresh") browseControls.current[context.pane]?.refresh();
       else if (command === "toggleHidden") browseControls.current[context.pane]?.toggleHidden();
       else if (!isTextInput(document.activeElement) && !modalOpen)
@@ -1320,11 +1543,19 @@ function App({
         <FilePane
           active={activePane === "left"}
           client={directoryClient}
-          favorites={favorites}
+          favorites={mergedFavorites}
+          finderFailed={finderFavorites.failed}
+          finderTimedOut={finderFavorites.timedOut}
+          finderUnresolved={finderFavorites.unresolved}
+          finderVisibilityAvailable={finderFavorites.visibilityAvailable}
           id="left"
           onBrowseControls={(controls) => updateBrowseControls("left", controls)}
+          locationWarnings={locationWarnings}
           locations={locations}
+          locationsLoading={locationsLoading}
           monitor={monitor}
+          onRefreshFavorites={refreshFinderFavorites}
+          onRefreshLocations={refreshLocations}
           onAddFavorite={addFavorite}
           onActivate={activatePane}
           onRemoveFavorite={removeFavorite}
@@ -1405,11 +1636,19 @@ function App({
         <FilePane
           active={activePane === "right"}
           client={directoryClient}
-          favorites={favorites}
+          favorites={mergedFavorites}
+          finderFailed={finderFavorites.failed}
+          finderTimedOut={finderFavorites.timedOut}
+          finderUnresolved={finderFavorites.unresolved}
+          finderVisibilityAvailable={finderFavorites.visibilityAvailable}
           id="right"
           onBrowseControls={(controls) => updateBrowseControls("right", controls)}
+          locationWarnings={locationWarnings}
           locations={locations}
+          locationsLoading={locationsLoading}
           monitor={monitor}
+          onRefreshFavorites={refreshFinderFavorites}
+          onRefreshLocations={refreshLocations}
           onAddFavorite={addFavorite}
           onActivate={activatePane}
           onRemoveFavorite={removeFavorite}
@@ -1682,6 +1921,13 @@ function App({
             </div>
           </form>
         </div>
+      ) : null}
+      {uninstallOpen ? (
+        <UninstallDialog
+          client={tauriUninstallClient}
+          onClose={() => setUninstallOpen(false)}
+          open
+        />
       ) : null}
       {contextMenu ? (
         <FileContextMenu

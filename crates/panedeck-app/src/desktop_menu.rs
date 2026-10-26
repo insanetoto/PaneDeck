@@ -24,13 +24,14 @@ pub enum DesktopCommandDto {
     Refresh,
     ToggleHidden,
     Diagnostics,
+    Uninstall,
     OperationLog,
     LanguageEnglish,
     LanguageChinese,
 }
 
 impl DesktopCommandDto {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::CopyToOther,
         Self::MoveToOther,
         Self::Copy,
@@ -42,6 +43,7 @@ impl DesktopCommandDto {
         Self::Refresh,
         Self::ToggleHidden,
         Self::Diagnostics,
+        Self::Uninstall,
         Self::OperationLog,
         Self::LanguageEnglish,
         Self::LanguageChinese,
@@ -61,6 +63,7 @@ impl DesktopCommandDto {
             Self::Refresh => "refresh",
             Self::ToggleHidden => "toggleHidden",
             Self::Diagnostics => "diagnostics",
+            Self::Uninstall => "uninstall",
             Self::OperationLog => "operationLog",
             Self::LanguageEnglish => "languageEnglish",
             Self::LanguageChinese => "languageChinese",
@@ -87,6 +90,7 @@ impl DesktopCommandDto {
             Self::ToggleHidden => Some("CmdOrCtrl+Shift+Period"),
             Self::OperationLog
             | Self::Diagnostics
+            | Self::Uninstall
             | Self::LanguageEnglish
             | Self::LanguageChinese => None,
         }
@@ -109,6 +113,7 @@ impl DesktopCommandDto {
             (DesktopLanguageDto::English, Self::OperationLog) => "Operation Log…",
             (DesktopLanguageDto::SimplifiedChinese, Self::OperationLog) => "操作日志…",
             (DesktopLanguageDto::English, Self::Diagnostics) => "Export Diagnostics…",
+            (DesktopLanguageDto::English, Self::Uninstall) => "Uninstall PaneDeck…",
             (_, Self::LanguageEnglish) => "English",
             (_, Self::LanguageChinese) => "简体中文",
             (DesktopLanguageDto::SimplifiedChinese, Self::CopyToOther) => "复制到另一窗格",
@@ -122,6 +127,7 @@ impl DesktopCommandDto {
             (DesktopLanguageDto::SimplifiedChinese, Self::Refresh) => "刷新",
             (DesktopLanguageDto::SimplifiedChinese, Self::ToggleHidden) => "显示隐藏项目",
             (DesktopLanguageDto::SimplifiedChinese, Self::Diagnostics) => "导出诊断…",
+            (DesktopLanguageDto::SimplifiedChinese, Self::Uninstall) => "卸载 PaneDeck…",
         }
     }
 }

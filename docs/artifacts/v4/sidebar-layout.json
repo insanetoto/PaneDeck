@@ -1,0 +1,30 @@
+{
+  "recordedAt": "2026-10-23",
+  "tool": "Chrome headless --headless=new; temporary v4-sidebar-audit page; 1000x760; no Tauri bridge",
+  "panes": "520px wide + 380px narrow; local Vite; 150px sidebar",
+  "note": "Single click/double click dispatched in page; not a trusted native pointer.",
+  "result": {
+    "viewport": {
+      "width": 1000,
+      "height": 617
+    },
+    "sidebarWidth": 150,
+    "sections": ["Favorites", "Locations"],
+    "locationButtons": 12,
+    "warning": "Unresolved Finder favorites: 1",
+    "systemFavoriteButtons": 1,
+    "appFavoriteButtons": 2,
+    "truncatedButtons": 2,
+    "pageOverflow": false,
+    "afterClick": 0,
+    "afterDoubleClick": 1,
+    "checks": {
+      "singleClickDoesNotOpen": true,
+      "doubleClickOpensOnce": true,
+      "systemFavoriteReadOnly": true,
+      "appFavoriteRemovable": true,
+      "unresolvedWarningVisible": true,
+      "noPageOverflow": true
+    }
+  }
+}

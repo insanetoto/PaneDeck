@@ -1,0 +1,75 @@
+{
+  "recordedAt": "2026-10-23",
+  "platform": {
+    "macOS": "27.2 (26B118)",
+    "arch": "arm64",
+    "adHocSignedAppBundle": true,
+    "launchMethod": "open (LaunchServices)",
+    "nativeTauriWindowVerified": true
+  },
+  "unbundledCli": {
+    "count": 0,
+    "failed": false,
+    "note": "LSSharedFileList returned an empty list to the unsigned CLI process."
+  },
+  "bundleDirectBinary": {
+    "count": 0,
+    "failed": false,
+    "note": "Executing the binary inside the .app directly bypassed LaunchServices registration."
+  },
+  "signedAppBundle": {
+    "count": 8,
+    "unresolved": 0,
+    "failed": false,
+    "allResolvedDirectories": true,
+    "virtualItems": 0,
+    "orderPreserved": true,
+    "displayNameEmptyCount": 7,
+    "displayNameLocalizedInLaterProbe": true,
+    "localizedNameFallback": true,
+    "names": [
+      "Applications",
+      "Desktop",
+      "Documents",
+      "custom-workspace",
+      "Downloads",
+      "Movies",
+      "Music",
+      "Pictures"
+    ]
+  },
+  "appBundleArchiveAccess": {
+    "directTerminalBinary": "visibility_available=true, filtered count=0",
+    "launchServicesAppBundle": "Operation not permitted reading FavoriteItems.sfl4; visibility_available=false; fallback hides shared items (count=0)",
+    "fullDiskAccessRequired": true,
+    "note": "Exact Finder parity currently requires Full Disk Access for the app; otherwise the UI hides the shared list and shows a warning."
+  },
+  "visibilityCalibration": {
+    "status": "superseded-hide-shared-items",
+    "archiveVisibilityValues": "FavoriteItems: 8/8 visibility=0; FavoriteVolumes: 21 items with mixed 0/1 but only a few visible in Finder",
+    "publicApi": "LSSharedFileListItemCopyProperty(kLSSharedFileListItemHidden) returned null for all items; visibility alone does not reproduce the Finder sidebar",
+    "note": "User authorized read-only parsing, then chose not to grant Full Disk Access. Final scope hides all shared favorites and shows a warning; display of visible custom items is not in scope."
+  },
+  "visibleFinderSidebarComparison": {
+    "match": false,
+    "visibleItemsInCapturedWindow": [
+      "iCloud Drive",
+      "home",
+      "Macintosh HD",
+      "AirDrop",
+      "Network",
+      "Trash"
+    ],
+    "note": "The shared list contains more entries than the captured Finder sidebar showed; hidden-property lookup returned null. Archive visibility filtering is implemented; Full Disk Access is required in the app and matching the full visible sidebar is still pending manual verification."
+  },
+  "resolutionFlags": ["kLSSharedFileListNoUserInteraction", "kLSSharedFileListDoNotMountVolumes"],
+  "writes": "none; Finder and its shared lists were not modified",
+  "missingSamples": [
+    "macOS 14/15/16",
+    "Chinese UI locale",
+    "stale bookmark",
+    "virtual AirDrop/Recents/tag items",
+    "TCC-denied or unreadable list"
+  ],
+  "probe": "crates/panedeck-platform/examples/finder_favorites_probe.rs"
+}

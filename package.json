@@ -31,7 +31,8 @@
     "test:web": "vitest run",
     "typecheck": "tsc --noEmit",
     "tauri": "tauri",
-    "test:e2e:v2": "vitest run src/App.test.tsx src/browser/VirtualFileList.test.tsx src/browser/directoryTree.test.ts src/browser/treeWatchCoordinator.test.ts src/commands/contextMenu.test.tsx src/commands/routing.test.tsx src/jobs/ConflictDialog.test.tsx src/jobs/BottomFeedback.test.tsx src/jobs/operationEvents.test.ts src/jobs/useOperationEvents.test.tsx && cargo test -p panedeck-app --test mvp_e2e --locked"
+    "test:e2e:v2": "vitest run src/App.test.tsx src/browser/VirtualFileList.test.tsx src/browser/directoryTree.test.ts src/browser/treeWatchCoordinator.test.ts src/commands/contextMenu.test.tsx src/commands/routing.test.tsx src/jobs/ConflictDialog.test.tsx src/jobs/BottomFeedback.test.tsx src/jobs/operationEvents.test.ts src/jobs/useOperationEvents.test.tsx && cargo test -p panedeck-app --test mvp_e2e --locked",
+    "test:e2e:v3": "vitest run src/App.test.tsx src/accessibility.test.tsx src/performance.test.tsx src/browser/VirtualFileList.test.tsx src/browser/directoryTree.test.ts src/browser/treeWatchCoordinator.test.ts src/commands/contextMenu.test.tsx src/commands/routing.test.tsx src/jobs/ConflictDialog.test.tsx src/jobs/BottomFeedback.test.tsx src/jobs/operationEvents.test.ts src/jobs/useOperationEvents.test.tsx && cargo test -p panedeck-app --test mvp_e2e --locked"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

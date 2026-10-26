@@ -1,0 +1,57 @@
+{
+  "recordedAt": "2026-10-23",
+  "platform": {
+    "macOS": "27.2 (26B118)",
+    "arch": "arm64",
+    "signedAppBundle": false
+  },
+  "standard": {
+    "home": true,
+    "desktop": true,
+    "downloads": true,
+    "documents": true
+  },
+  "iCloud": {
+    "pathPresent": true,
+    "directory": true,
+    "ubiquitousItem": true,
+    "downloadingStatus": "current",
+    "volume": "Macintosh HD"
+  },
+  "cloudStorage": {
+    "rootPresent": true,
+    "entries": 0,
+    "note": "No third-party File Provider roots were installed on this machine."
+  },
+  "volumes": {
+    "count": 1,
+    "items": [
+      {
+        "name": "Macintosh HD",
+        "local": true,
+        "internal": true,
+        "removable": false,
+        "browsable": true,
+        "rootFileSystem": true,
+        "directory": true,
+        "hasUUID": true
+      }
+    ],
+    "externalOrNetworkSamples": 0
+  },
+  "writes": "none",
+  "reads": [
+    "entry-point metadata only",
+    "CloudStorage root names only",
+    "no provider subdirectories",
+    "no cloud downloads",
+    "no mounts"
+  ],
+  "missingSamples": [
+    "external volume",
+    "NAS or network volume",
+    "third-party cloud account",
+    "macOS 14/15/16"
+  ],
+  "probe": "crates/panedeck-platform/examples/locations_probe.rs"
+}

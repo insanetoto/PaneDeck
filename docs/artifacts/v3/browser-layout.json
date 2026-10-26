@@ -1,0 +1,167 @@
+{
+  "environment": "Headless Chrome, fixture data; CSS zoom used for 2x, not native WebView or Finder",
+  "results": [
+    {
+      "language": "en",
+      "colorScheme": "light",
+      "width": 1120,
+      "height": 720,
+      "zoom": 1,
+      "geometry": {
+        "panes": [
+          {
+            "x": 0,
+            "y": 0,
+            "w": 559.5,
+            "h": 720
+          },
+          {
+            "x": 560.5,
+            "y": 0,
+            "w": 559.5,
+            "h": 720
+          }
+        ],
+        "workspace": {
+          "x": 0,
+          "y": 0,
+          "w": 1120,
+          "h": 720
+        },
+        "divider": {
+          "x": 559.5,
+          "y": 0,
+          "w": 1,
+          "h": 720
+        },
+        "windowWidth": 1120,
+        "windowHeight": 720,
+        "documentWidth": 1120,
+        "iconCount": 2,
+        "labels": 0,
+        "font": "13px",
+        "rowHeight": 26,
+        "disclosure": {
+          "x": 124,
+          "y": 135,
+          "w": 20,
+          "h": 24
+        },
+        "nameCell": {
+          "x": 116,
+          "y": 135,
+          "w": 186,
+          "h": 24
+        }
+      }
+    },
+    {
+      "language": "zh-CN",
+      "colorScheme": "dark",
+      "width": 800,
+      "height": 520,
+      "zoom": 1,
+      "geometry": {
+        "panes": [
+          {
+            "x": 0,
+            "y": 0,
+            "w": 399.5,
+            "h": 520
+          },
+          {
+            "x": 400.5,
+            "y": 0,
+            "w": 399.5,
+            "h": 520
+          }
+        ],
+        "workspace": {
+          "x": 0,
+          "y": 0,
+          "w": 800,
+          "h": 520
+        },
+        "divider": {
+          "x": 399.5,
+          "y": 0,
+          "w": 1,
+          "h": 520
+        },
+        "windowWidth": 800,
+        "windowHeight": 520,
+        "documentWidth": 800,
+        "iconCount": 2,
+        "labels": 0,
+        "font": "13px",
+        "rowHeight": 26,
+        "disclosure": {
+          "x": 88,
+          "y": 152,
+          "w": 20,
+          "h": 24
+        },
+        "nameCell": {
+          "x": 80,
+          "y": 152,
+          "w": 186,
+          "h": 24
+        }
+      }
+    },
+    {
+      "language": "zh-CN",
+      "colorScheme": "light",
+      "width": 1600,
+      "height": 1040,
+      "zoom": 2,
+      "geometry": {
+        "panes": [
+          {
+            "x": 0,
+            "y": 0,
+            "w": 799,
+            "h": 1040
+          },
+          {
+            "x": 801,
+            "y": 0,
+            "w": 799,
+            "h": 1040
+          }
+        ],
+        "workspace": {
+          "x": 0,
+          "y": 0,
+          "w": 1600,
+          "h": 1040
+        },
+        "divider": {
+          "x": 799,
+          "y": 0,
+          "w": 2,
+          "h": 1040
+        },
+        "windowWidth": 1600,
+        "windowHeight": 1040,
+        "documentWidth": 800,
+        "iconCount": 2,
+        "labels": 0,
+        "font": "13px",
+        "rowHeight": 52,
+        "disclosure": {
+          "x": 248,
+          "y": 270,
+          "w": 40,
+          "h": 48
+        },
+        "nameCell": {
+          "x": 232,
+          "y": 270,
+          "w": 372,
+          "h": 48
+        }
+      }
+    }
+  ]
+}

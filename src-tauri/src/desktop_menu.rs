@@ -66,6 +66,8 @@ pub fn build(app: &AppHandle, snapshot: &DesktopMenuSnapshotDto) -> tauri::Resul
             &languages,
             &item(app, snapshot, Command::Diagnostics)?,
             &PredefinedMenuItem::separator(app)?,
+            &item(app, snapshot, Command::Uninstall)?,
+            &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::hide(
                 app,
                 Some(if chinese {

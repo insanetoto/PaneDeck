@@ -38,6 +38,7 @@ export interface DirectoryClient {
   ): Promise<void>;
   readTreeNode?(nodeId: string, options: BrowseOptions): Promise<DirectoryListing>;
   releaseTreeNode?(pane: PaneId, nodeId: string): Promise<void>;
+  readEntryIcon?(entry: EntryReference): Promise<string>;
   openPath(path: string, options: BrowseOptions): Promise<DirectoryListing>;
   openChild(entry: EntryReference, options: BrowseOptions): Promise<DirectoryListing>;
   openParent(directory: DirectoryReference, options: BrowseOptions): Promise<DirectoryListing>;
@@ -49,6 +50,7 @@ export const tauriDirectoryClient: DirectoryClient = {
     invoke("hold_tree_node", { request: { pane, nodeId, ...target } }),
   readTreeNode: (nodeId, options) => invoke("read_tree_node", { request: { nodeId, ...options } }),
   releaseTreeNode: (pane, nodeId) => invoke("release_tree_node", { request: { pane, nodeId } }),
+  readEntryIcon: (entry) => invoke("read_entry_icon", { entry }),
   openPath: (path, options) => invoke("open_directory", { request: { ...options, path } }),
   openChild: (entry, options) => invoke("open_child_directory", { request: { ...options, entry } }),
   openParent: (directory, options) =>

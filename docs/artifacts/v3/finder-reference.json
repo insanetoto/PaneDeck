@@ -1,0 +1,6 @@
+{
+  "source": "Same-machine Finder list view; new test-owned window queried with AppleScript",
+  "textSizePoints": 13,
+  "screenshot": "Not obtained: screencapture reported could not create image from window",
+  "comparison": "Font size query only; screenshots in this directory are Chrome fixture renders, not native WebView/Finder"
+}

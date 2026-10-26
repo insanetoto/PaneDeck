@@ -1,24 +1,101 @@
 import { DragInteraction, INTERNAL_DRAG_TYPE } from "./dragInteraction";
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type DragEvent,
   type KeyboardEvent,
   type MouseEvent,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
 } from "react";
 import type { EntrySnapshot } from "../ipc/pathReferences";
 import { useI18n } from "../i18n/I18nProvider";
 import type { MessageKey } from "../i18n/messages";
-import type { SortDirection, SortField } from "./directoryApi";
+import type { PaneId, SortDirection, SortField } from "./directoryApi";
+import {
+  COLUMN_WIDTH_LIMITS,
+  DEFAULT_COLUMN_WIDTHS,
+  clampColumnWidth,
+  columnWidthValue,
+  loadColumnWidths,
+  saveColumnWidths,
+  tableMinWidth,
+  withColumnWidth,
+  type ColumnField,
+  type ColumnWidths,
+} from "./columnWidths";
 
 import { entryKey, sortEntries } from "./sortEntries";
 export { entryKey, sortEntries } from "./sortEntries";
 
 import { normalizeTreeSelection, selectionAfterCollapse, type TreeRow } from "./directoryTree";
 
-const ROW_HEIGHT = 32;
+export const FILE_ROW_HEIGHT = 28;
+
+const iconCache = new Map<string, string>();
+
+function iconCacheKey(entry: EntrySnapshot): string {
+  if (entry.kind === "directory" || entry.kind === "symlink") {
+    return `${entry.kind}:${entry.reference.sessionId}:${entry.reference.entryId}`;
+  }
+  const dot = entry.displayName.lastIndexOf(".");
+  return `file:${dot > 0 ? entry.displayName.slice(dot + 1).toLowerCase() : ""}`;
+}
+
+function FileIcon({
+  entry,
+  loadIcon,
+}: {
+  entry: EntrySnapshot;
+  loadIcon?: (entry: EntrySnapshot) => Promise<string>;
+}) {
+  const key = iconCacheKey(entry);
+  const [src, setSrc] = useState(() => iconCache.get(key) ?? "");
+  useEffect(() => {
+    if (iconCache.has(key)) return;
+    if (!loadIcon || entry.kind === "symlink") return;
+    let cancelled = false;
+    void loadIcon(entry)
+      .then((data) => {
+        if (cancelled || !data) return;
+        iconCache.set(key, data);
+        setSrc(data);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [entry, key, loadIcon]);
+  if (entry.kind === "symlink") return "↗";
+  if (src) {
+    return <img alt="" className="file-icon-image" draggable={false} src={src} />;
+  }
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 20 18"
+      fill="none"
+      className={entry.kind === "directory" ? "file-icon-folder" : "file-icon-document"}
+    >
+      {entry.kind === "directory" ? (
+        <path
+          d="M1.5 5V3a1 1 0 0 1 1-1H8l2 3h7.5a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-15a1 1 0 0 1-1-1Z"
+          fill="var(--color-folder-fill)"
+          stroke="var(--color-folder-stroke)"
+          strokeWidth=".8"
+        />
+      ) : (
+        <path d="M4 1h8l4 4v12H4Zm8 0v4h4" stroke="currentColor" strokeWidth="1" />
+      )}
+    </svg>
+  );
+}
+const ROW_HEIGHT = FILE_ROW_HEIGHT;
 const OVERSCAN = 6;
 
 export function calculateVisibleRange(
@@ -37,11 +114,16 @@ export function calculateVisibleRange(
 interface VirtualFileListProps {
   cutEntryKeys?: ReadonlySet<string>;
   entries: EntrySnapshot[];
+  /** Rendered below the fixed header when the directory has no visible entries. */
+  emptyState?: ReactNode;
+  /** Column widths and their persisted settings are scoped to one pane. */
+  pane?: PaneId;
   treeRows?: readonly TreeRow[];
   onToggleTree?: (key: string) => void;
   onHoverExpand?: (key: string) => void;
   onRetryTree?: (key: string) => void;
   onOpen: (entry: EntrySnapshot) => void;
+  loadIcon?: (entry: EntrySnapshot) => Promise<string>;
   onEntryContextMenu?: (
     entry: EntrySnapshot,
     x: number,
@@ -84,11 +166,14 @@ function kindMessageKey(kind: EntrySnapshot["kind"]): MessageKey {
 export function VirtualFileList({
   cutEntryKeys = new Set(),
   entries,
+  emptyState,
+  pane = "left",
   treeRows,
   onToggleTree,
   onRetryTree,
   onHoverExpand,
   onOpen,
+  loadIcon,
   onEntryContextMenu,
   onEntryDragEnd,
   onEntryDragStart,
@@ -112,12 +197,113 @@ export function VirtualFileList({
   }, [interaction, dragToken, entries]);
 
   const [scrollTop, setScrollTop] = useState(0);
+  const [scrollLeft, setScrollLeft] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(400);
+  const [scrollbarWidth, setScrollbarWidth] = useState(0);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [focusedId, setFocusedId] = useState<string | null>(null);
   const [anchorId, setAnchorId] = useState<string | null>(null);
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
   const [invalidDropId, setInvalidDropId] = useState<string | null>(null);
+  const [columnWidths, setColumnWidths] = useState<ColumnWidths>(() => loadColumnWidths(pane));
+  const columnWidthsRef = useRef(columnWidths);
+  const [resizingColumn, setResizingColumn] = useState<ColumnField | null>(null);
+  const resizeRef = useRef<{
+    field: ColumnField;
+    startX: number;
+    startWidth: number;
+    startValue: number | null;
+    currentWidth: number;
+    moved: boolean;
+    pointerId: number;
+  } | null>(null);
+  const lastColumnClick = useRef<{ field: ColumnField; at: number } | null>(null);
+
+  const updateColumnWidth = (field: ColumnField, value: number | null) => {
+    const next = withColumnWidth(columnWidthsRef.current, field, value);
+    columnWidthsRef.current = next;
+    setColumnWidths(next);
+    return next;
+  };
+
+  const widthOrLimit = (field: ColumnField) =>
+    columnWidthValue(columnWidthsRef.current, field) ?? COLUMN_WIDTH_LIMITS[field].min;
+
+  const startResizing = (field: ColumnField, event: ReactPointerEvent<HTMLSpanElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const previous = lastColumnClick.current;
+    if (previous && previous.field === field && event.timeStamp - previous.at <= 400) {
+      // Some WebViews suppress compatibility mouse events after preventDefault,
+      // so detect the second click on pointerdown as well as via onDoubleClick.
+      lastColumnClick.current = null;
+      saveColumnWidths(pane, updateColumnWidth(field, DEFAULT_COLUMN_WIDTHS[field]));
+      return;
+    }
+    const startValue = columnWidthValue(columnWidthsRef.current, field);
+    const cellWidth = event.currentTarget.parentElement?.getBoundingClientRect().width;
+    const startWidth =
+      field === "name" && startValue === null && Number.isFinite(cellWidth)
+        ? Math.max(COLUMN_WIDTH_LIMITS.name.min, cellWidth ?? 0)
+        : (startValue ?? COLUMN_WIDTH_LIMITS[field].min);
+    resizeRef.current = {
+      field,
+      startX: event.clientX,
+      startWidth,
+      startValue,
+      currentWidth: startWidth,
+      moved: false,
+      pointerId: event.pointerId,
+    };
+    setResizingColumn(field);
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  };
+
+  const moveResizing = (event: ReactPointerEvent<HTMLSpanElement>) => {
+    const drag = resizeRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const delta = event.clientX - drag.startX;
+    if (delta === 0) return;
+    drag.moved = true;
+    drag.currentWidth = clampColumnWidth(drag.field, drag.startWidth + delta);
+    updateColumnWidth(drag.field, drag.currentWidth);
+  };
+
+  const finishResizing = (commit: boolean, timeStamp?: number) => {
+    const drag = resizeRef.current;
+    if (!drag) return;
+    resizeRef.current = null;
+    setResizingColumn(null);
+    if (!drag.moved) {
+      if (commit) lastColumnClick.current = { field: drag.field, at: timeStamp ?? 0 };
+      return;
+    }
+    if (!commit) {
+      updateColumnWidth(drag.field, drag.startValue);
+      return;
+    }
+    saveColumnWidths(pane, columnWidthsRef.current);
+  };
+
+  const resetColumnWidth = (field: ColumnField) => {
+    saveColumnWidths(pane, updateColumnWidth(field, DEFAULT_COLUMN_WIDTHS[field]));
+  };
+
+  const resizeColumnByKeyboard = (field: ColumnField, event: KeyboardEvent<HTMLSpanElement>) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    event.stopPropagation();
+    const current =
+      field === "name" && columnWidthValue(columnWidthsRef.current, "name") === null
+        ? (event.currentTarget.parentElement?.getBoundingClientRect().width ??
+          COLUMN_WIDTH_LIMITS.name.min)
+        : widthOrLimit(field);
+    const step = event.shiftKey ? 24 : 8;
+    const delta = event.key === "ArrowRight" ? step : -step;
+    saveColumnWidths(pane, updateColumnWidth(field, clampColumnWidth(field, current + delta)));
+  };
+
   const sorted = useMemo(
     () =>
       treeRows ? treeRows.map((row) => row.entry) : sortEntries(entries, sortField, sortDirection),
@@ -145,13 +331,23 @@ export function VirtualFileList({
     );
   }, [effectiveSelected, onSelectionChange, sorted, treeRows]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const viewport = viewportRef.current;
     if (!viewport) return;
-    const update = () => setViewportHeight(viewport.clientHeight || 400);
+    const update = () => {
+      setViewportHeight(viewport.clientHeight || 400);
+      const next = Math.max(0, viewport.offsetWidth - viewport.clientWidth);
+      setScrollbarWidth((current) => (current === next ? current : next));
+    };
     update();
+    const observer =
+      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => update());
+    observer?.observe(viewport);
     window.addEventListener("resize", update);
-    return () => window.removeEventListener("resize", update);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", update);
+    };
   }, []);
 
   useEffect(() => {
@@ -251,10 +447,66 @@ export function VirtualFileList({
     </button>
   );
 
+  const columnHeader = (field: ColumnField, label: string) => {
+    const value = columnWidths[field];
+    return (
+      <span data-column={field} key={field} role="columnheader">
+        {header(field, label)}
+        <span
+          aria-label={t("list.resizeColumn").replace("{column}", label)}
+          aria-orientation="vertical"
+          aria-valuemax={COLUMN_WIDTH_LIMITS[field].max}
+          aria-valuemin={COLUMN_WIDTH_LIMITS[field].min}
+          aria-valuenow={value ?? undefined}
+          aria-valuetext={
+            value === null
+              ? t("list.columnAuto").replace("{column}", label)
+              : t("list.columnWidth")
+                  .replace("{column}", label)
+                  .replace("{value}", String(Math.round(value)))
+          }
+          className="column-resizer"
+          onDoubleClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            resetColumnWidth(field);
+          }}
+          onKeyDown={(event) => resizeColumnByKeyboard(field, event)}
+          onLostPointerCapture={() => finishResizing(false)}
+          onPointerCancel={() => finishResizing(false)}
+          onPointerDown={(event) => startResizing(field, event)}
+          onPointerMove={moveResizing}
+          onPointerUp={(event) => {
+            finishResizing(true, event.timeStamp);
+            if (event.currentTarget.hasPointerCapture?.(event.pointerId))
+              event.currentTarget.releasePointerCapture(event.pointerId);
+          }}
+          role="separator"
+          tabIndex={0}
+          title={t("list.resetColumnWidth").replace("{column}", label)}
+        />
+      </span>
+    );
+  };
+
+  const tableStyle = {
+    "--col-name":
+      columnWidths.name === null
+        ? `minmax(${COLUMN_WIDTH_LIMITS.name.min}px, 1fr)`
+        : `${columnWidths.name}px`,
+    "--col-size": `${columnWidths.size}px`,
+    "--col-kind": `${columnWidths.kind}px`,
+    "--col-modified": `${columnWidths.modifiedAt}px`,
+    "--table-min-width": `${tableMinWidth(columnWidths)}px`,
+    "--table-scrollbar-width": `${scrollbarWidth}px`,
+  } as CSSProperties;
+
   return (
     <div
       className="file-table"
+      data-resizing={resizingColumn ?? undefined}
       role={treeRows ? "treegrid" : "grid"}
+      style={tableStyle}
       tabIndex={treeRows ? 0 : undefined}
       onKeyDown={treeRows ? handleKeyDown : undefined}
       aria-activedescendant={treeRows ? activeDescendant : undefined}
@@ -263,11 +515,15 @@ export function VirtualFileList({
       aria-rowcount={sorted.length + 1}
       data-selected-count={effectiveSelected.size}
     >
-      <div className="file-table-header" role="row">
-        <span role="columnheader">{header("name", t("list.name"))}</span>
-        <span role="columnheader">{header("size", t("list.size"))}</span>
-        <span role="columnheader">{header("kind", t("list.kind"))}</span>
-        <span role="columnheader">{header("modifiedAt", t("list.modified"))}</span>
+      <div
+        className="file-table-header"
+        role="row"
+        style={{ transform: `translateX(-${scrollLeft}px)` }}
+      >
+        {columnHeader("name", t("list.name"))}
+        {columnHeader("size", t("list.size"))}
+        {columnHeader("kind", t("list.kind"))}
+        {columnHeader("modifiedAt", t("list.modified"))}
       </div>
       <div
         aria-activedescendant={!treeRows ? activeDescendant : undefined}
@@ -282,7 +538,10 @@ export function VirtualFileList({
           if (!event.currentTarget.contains(event.relatedTarget as Node | null))
             interaction.clear();
         }}
-        onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+        onScroll={(event) => {
+          setScrollTop(event.currentTarget.scrollTop);
+          setScrollLeft(event.currentTarget.scrollLeft);
+        }}
         ref={viewportRef}
         role="rowgroup"
         tabIndex={treeRows ? undefined : 0}
@@ -398,7 +657,9 @@ export function VirtualFileList({
                       <span
                         className="tree-indent"
                         aria-hidden="true"
-                        style={{ width: Math.min(row.level - 1, 5) * 12 }}
+                        style={{
+                          width: `calc(${Math.min(row.level - 1, 5)} * var(--tree-indent-size))`,
+                        }}
                       />
                       {entry.kind === "directory" ? (
                         <button
@@ -413,32 +674,36 @@ export function VirtualFileList({
                           }}
                           onDoubleClick={(event) => event.stopPropagation()}
                         >
-                          {row.expanded ? "▾" : "▸"}
+                          <svg
+                            aria-hidden="true"
+                            width="10"
+                            height="10"
+                            viewBox="0 0 10 10"
+                            className="tree-disclosure-icon"
+                            data-expanded={row.expanded}
+                          >
+                            <path
+                              d="m3.5 2 3 3-3 3"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="1.5"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            />
+                          </svg>
                         </button>
                       ) : (
                         <span className="tree-disclosure-spacer" aria-hidden="true" />
                       )}
                       <span className="tree-file-icon" aria-hidden="true">
-                        {entry.kind === "symlink" ? (
-                          "↗"
-                        ) : (
-                          <svg width="16" height="16" viewBox="0 0 20 18" fill="none">
-                            {entry.kind === "directory" ? (
-                              <path d="M1 5V2h7l2 3h9v11H1Z" fill="currentColor" />
-                            ) : (
-                              <path
-                                d="M4 1h8l4 4v12H4Zm8 0v4h4"
-                                stroke="currentColor"
-                                strokeWidth="1.5"
-                              />
-                            )}
-                          </svg>
-                        )}
+                        <FileIcon entry={entry} key={iconCacheKey(entry)} loadIcon={loadIcon} />
                       </span>
                     </>
-                  ) : entry.kind === "directory" ? (
-                    "▸ "
-                  ) : null}
+                  ) : (
+                    <span className="tree-file-icon" aria-hidden="true">
+                      <FileIcon entry={entry} key={iconCacheKey(entry)} loadIcon={loadIcon} />
+                    </span>
+                  )}
                   <span className="tree-name">{entry.displayName}</span>
                   {row?.loading ? (
                     <span className="tree-loading" role="status" aria-label={t("pane.loading")}>
@@ -477,6 +742,9 @@ export function VirtualFileList({
           })}
         </div>
       </div>
+      {emptyState && sorted.length === 0 ? (
+        <div className="file-list-empty">{emptyState}</div>
+      ) : null}
     </div>
   );
 }

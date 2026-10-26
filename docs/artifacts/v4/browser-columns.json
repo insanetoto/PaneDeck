@@ -1,0 +1,76 @@
+{
+  "recordedAt": "2026-10-23",
+  "tool": "Google Chrome headless --headless=new; page v4-audit.html; 1100x1000; local Vite; synthetic scroll/keyboard only",
+  "note": "Panels: 480px default (left), 480px stored wide (right), 480px empty, 700px wide pane. Column widths measured from real layout; pointer drag is covered by jsdom tests.",
+  "viewport": {
+    "width": 1100,
+    "height": 857
+  },
+  "left": {
+    "headerWidths": [186, 92, 92, 150],
+    "rowWidths": [186, 92, 92, 150],
+    "widthDeltas": [0, 0, 0, 0],
+    "minWidth": "520px",
+    "scroll": {
+      "clientWidth": 463,
+      "scrollWidth": 520
+    },
+    "headerTransform": "translateX(0px)"
+  },
+  "right": {
+    "headerWidths": [600, 132, 92, 150],
+    "rowWidths": [600, 132, 92, 150],
+    "widthDeltas": [0, 0, 0, 0],
+    "minWidth": "974px",
+    "scroll": {
+      "clientWidth": 463,
+      "scrollWidth": 974
+    },
+    "headerTransform": "translateX(0px)",
+    "headerTransformAfterScroll": "translateX(-180px)",
+    "alignmentAfterScroll": [0, 0, 0, 0]
+  },
+  "empty": {
+    "headerWidths": [186, 92, 92, 150],
+    "rowWidths": [],
+    "widthDeltas": [186, 92, 92, 150],
+    "minWidth": "520px",
+    "scroll": {
+      "clientWidth": 478,
+      "scrollWidth": 520
+    },
+    "headerTransform": "translateX(0px)",
+    "separators": 4,
+    "headerPresent": true,
+    "rows": 1,
+    "showsEmptyText": true
+  },
+  "keyboard": {
+    "sizeAfterArrow": "140px",
+    "sizeAfterReset": "92px"
+  },
+  "wide": {
+    "headerWidths": [349, 92, 92, 150],
+    "rowWidths": [349, 92, 92, 150],
+    "widthDeltas": [0, 0, 0, 0],
+    "minWidth": "520px",
+    "scroll": {
+      "clientWidth": 683,
+      "scrollWidth": 683
+    },
+    "headerTransform": "translateX(0px)"
+  },
+  "checks": {
+    "leftColumnsAligned": true,
+    "rightColumnsAligned": true,
+    "wideColumnsAligned": true,
+    "wideNoHorizontalOverflow": true,
+    "horizontalOverflow": true,
+    "alignmentAfterScroll": true,
+    "headerTranslated": true,
+    "keyboardAdjusts": true,
+    "doubleClickResets": true,
+    "emptyHeaderAdjustable": true,
+    "emptyStateVisible": true
+  }
+}

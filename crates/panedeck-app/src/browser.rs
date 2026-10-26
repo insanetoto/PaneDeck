@@ -558,6 +558,16 @@ impl BrowserService {
             })
             .collect())
     }
+    pub fn entry_icon(&self, reference: EntryReferenceDto) -> Result<String, BrowseErrorDto> {
+        let path = self
+            .resolve_entries(vec![reference])?
+            .into_iter()
+            .next()
+            .ok_or_else(|| error(BrowseErrorCode::StaleReference))?;
+        panedeck_platform::entry_icon_data_url(path.as_path())
+            .ok_or_else(|| error(BrowseErrorCode::Io))
+    }
+
     pub fn resolve_selection(
         &self,
         references: Vec<EntryReferenceDto>,
@@ -1241,6 +1251,27 @@ mod tests {
             .entries
             .iter()
             .any(|entry| entry.display_name == ".hidden"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn entry_icon_resolves_a_native_png_for_a_pdf() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("sample.pdf"), b"%PDF-1.4\n").unwrap();
+        let service = BrowserService::default();
+        let listing = service
+            .open_path(request(temp.path().to_string_lossy().into_owned()))
+            .await
+            .unwrap();
+        let entry = listing
+            .entries
+            .iter()
+            .find(|entry| entry.display_name == "sample.pdf")
+            .expect("pdf entry");
+        let data = service
+            .entry_icon(entry.reference.clone())
+            .expect("native icon");
+        assert!(data.starts_with("data:image/png;base64,"));
     }
 
     #[tokio::test]

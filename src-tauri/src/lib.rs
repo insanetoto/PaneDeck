@@ -2,15 +2,16 @@ use panedeck_app::{
     AppServices, BrowseErrorDto, CancelOperationRequestDto, CleanupRecoveryRequestDto,
     ClipboardErrorDto, ClipboardStateDto, CreateChildDirectoryRequestDto,
     CreateDirectoryRequestDto, DiagnosticExportRequestDto, DiagnosticPreviewDto,
-    DirectoryListingDto, HoldTreeNodeRequestDto, LocalLocationsDto, NavigateChildRequestDto,
+    DirectoryListingDto, EntryReferenceDto, FinderFavoritesDto, HoldTreeNodeRequestDto,
+    LocalLocationWarningDto, LocalLocationsDto, NavigateChildRequestDto,
     NavigateDirectoryRequestDto, NavigateKnownRequestDto, OperationErrorDto,
     OperationItemOutcomeDto, OperationJobDto, PasteDraftDto, PasteDraftRequestDto,
     PasteItemCompletion, PreparePasteRequestDto, ReadTreeNodeRequestDto, RecoveryItemDto,
     RenameRequestDto, ResolveConflictRequestDto, SetClipboardRequestDto,
     StopDirectoryWatchRequestDto, TransferRequestDto, TrashRequestDto, TreeNodeRequestDto,
-    WatchDirectoryRequestDto,
+    UninstallPreviewDto, UninstallRequestDto, UninstallResultDto, WatchDirectoryRequestDto,
 };
-use tauri::{Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 #[derive(Default)]
 struct OperationWatchState(std::sync::Mutex<std::collections::BTreeMap<String, u64>>);
 mod context_menu;
@@ -28,6 +29,46 @@ fn hold_tree_node(
 #[tauri::command]
 fn release_tree_node(state: tauri::State<'_, AppServices>, request: TreeNodeRequestDto) {
     state.browser().release_tree_node(request);
+}
+#[tauri::command]
+fn read_entry_icon(
+    state: tauri::State<'_, AppServices>,
+    entry: EntryReferenceDto,
+) -> Result<String, BrowseErrorDto> {
+    state.browser().entry_icon(entry)
+}
+
+fn current_app_bundle() -> Option<std::path::PathBuf> {
+    std::env::current_exe()
+        .ok()?
+        .ancestors()
+        .find(|path| {
+            path.extension().and_then(|value| value.to_str()) == Some("app") && path.is_dir()
+        })
+        .map(std::path::Path::to_path_buf)
+}
+
+#[tauri::command]
+fn preview_uninstall(app: AppHandle) -> Result<UninstallPreviewDto, String> {
+    let home = app.path().home_dir().map_err(|error| error.to_string())?;
+    Ok(panedeck_app::uninstall::preview(
+        &home,
+        current_app_bundle().as_deref(),
+    ))
+}
+
+#[tauri::command]
+fn uninstall_app(
+    app: AppHandle,
+    request: UninstallRequestDto,
+) -> Result<UninstallResultDto, String> {
+    let home = app.path().home_dir().map_err(|error| error.to_string())?;
+    panedeck_app::uninstall::uninstall(&home, current_app_bundle().as_deref(), request)
+}
+
+#[tauri::command]
+fn quit_app(app: AppHandle) {
+    app.exit(0);
 }
 #[tauri::command]
 async fn read_tree_node(
@@ -70,8 +111,33 @@ async fn reopen_directory(
 }
 
 #[tauri::command]
-fn list_local_locations(state: tauri::State<'_, AppServices>) -> LocalLocationsDto {
-    state.locations().discover()
+async fn list_finder_favorites(
+    state: tauri::State<'_, AppServices>,
+    refresh: bool,
+) -> Result<FinderFavoritesDto, String> {
+    let service = state.finder_favorites().clone();
+    let fallback = service.clone();
+    Ok(
+        tauri::async_runtime::spawn_blocking(move || service.discover(refresh))
+            .await
+            .unwrap_or_else(|_| fallback.snapshot_with_warning()),
+    )
+}
+
+#[tauri::command]
+async fn list_local_locations(
+    state: tauri::State<'_, AppServices>,
+    refresh: bool,
+) -> Result<LocalLocationsDto, String> {
+    let service = state.locations().clone();
+    let fallback = service.clone();
+    Ok(
+        tauri::async_runtime::spawn_blocking(move || service.discover(refresh))
+            .await
+            .unwrap_or_else(|_| {
+                fallback.snapshot_with_warning(LocalLocationWarningDto::RefreshFailed)
+            }),
+    )
 }
 
 #[tauri::command]
@@ -322,6 +388,16 @@ pub fn run() {
             app.manage(DesktopMenuState::default());
             app.manage(ContextMenuState::default());
             app.manage(OperationWatchState::default());
+            if let Some(observer) = panedeck_app::observe_volume_changes({
+                let app = app.handle().clone();
+                move || {
+                    let _ = app.emit("locations-changed", ());
+                }
+            }) {
+                // The observer lives for the process lifetime; native cleanup
+                // happens when the application exits.
+                Box::leak(Box::new(observer));
+            }
             app.set_menu(desktop_menu::build(
                 app.handle(),
                 &panedeck_app::DesktopMenuSnapshotDto {
@@ -352,11 +428,16 @@ pub fn run() {
             hold_tree_node,
             read_tree_node,
             release_tree_node,
+            read_entry_icon,
+            preview_uninstall,
+            uninstall_app,
+            quit_app,
             open_directory,
             open_child_directory,
             open_parent_directory,
             reopen_directory,
             list_local_locations,
+            list_finder_favorites,
             start_directory_watch,
             stop_directory_watch,
             set_file_clipboard,

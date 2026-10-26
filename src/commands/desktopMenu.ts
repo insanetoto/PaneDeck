@@ -11,6 +11,7 @@ export type DesktopCommand =
   | "refresh"
   | "toggleHidden"
   | "diagnostics"
+  | "uninstall"
   | "languageEnglish"
   | "languageChinese";
 export interface DesktopMenuPresentation {

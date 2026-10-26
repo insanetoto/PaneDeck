@@ -12,6 +12,7 @@ pub use context_menu::{
     ContextMenuRequestDto,
 };
 mod diagnostics;
+mod finder_favorites;
 mod locations;
 mod operation_log;
 mod operations;
@@ -20,6 +21,7 @@ pub use operation_log::{
 };
 mod path_ipc;
 mod recovery;
+pub mod uninstall;
 
 pub use browser::{
     BrowseErrorCode, BrowseErrorDto, BrowserService, DirectoryListingDto, DirectoryWatchEventDto,
@@ -38,8 +40,10 @@ pub use desktop_menu::{
 };
 pub use diagnostics::{DiagnosticExportRequestDto, DiagnosticPreviewDto, DiagnosticService};
 
+pub use finder_favorites::{FinderFavoriteDto, FinderFavoritesDto, FinderFavoritesService};
 pub use locations::{
-    LocalLocationDto, LocalLocationKindDto, LocalLocationService, LocalLocationsDto,
+    LocalLocationDto, LocalLocationKindDto, LocalLocationService, LocalLocationSourceDto,
+    LocalLocationWarningDto, LocalLocationsDto,
 };
 pub use operations::{
     CancelOperationRequestDto, ConflictDecisionDto, ConflictEntryDto, ConflictKindDto,
@@ -50,6 +54,10 @@ pub use operations::{
     TransferDestinationDto, TransferRequestDto, TrashRequestDto,
 };
 pub use recovery::{CleanupRecoveryRequestDto, RecoveryError, RecoveryItemDto, RecoveryService};
+pub use uninstall::{
+    UninstallDataKindDto, UninstallPathDto, UninstallPreviewDto, UninstallRequestDto,
+    UninstallResultDto,
+};
 
 pub use path_ipc::{
     DirectoryReferenceDto, EntryKindDto, EntryReferenceDto, EntrySnapshotDto, IpcReferenceError,
@@ -66,6 +74,7 @@ pub struct AppServices {
     browser: BrowserService,
     clipboard: ClipboardService,
     diagnostics: DiagnosticService,
+    finder_favorites: FinderFavoritesService,
     locations: LocalLocationService,
     operations: OperationService,
     recovery: RecoveryService,
@@ -92,6 +101,11 @@ impl AppServices {
     #[must_use]
     pub const fn browser(&self) -> &BrowserService {
         &self.browser
+    }
+
+    #[must_use]
+    pub const fn finder_favorites(&self) -> &FinderFavoritesService {
+        &self.finder_favorites
     }
 
     #[must_use]
@@ -124,6 +138,15 @@ impl std::fmt::Debug for AppServices {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("AppServices(<state redacted>)")
     }
+}
+
+/// Starts native volume-change observation through the platform layer.
+#[must_use]
+pub fn observe_volume_changes<F>(callback: F) -> Option<panedeck_platform::VolumeObserver>
+where
+    F: Fn() + 'static,
+{
+    panedeck_platform::observe_volume_changes(callback)
 }
 
 /// Returns the stable product name without exposing domain internals to Tauri.

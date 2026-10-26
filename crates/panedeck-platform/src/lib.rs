@@ -9,6 +9,22 @@ use panedeck_fs::{
     TrashBackendError,
 };
 
+mod app_removal;
+mod file_icon;
+mod finder_favorites;
+mod locations;
+mod volume_observer;
+pub use app_removal::trash_app_bundle;
+pub use file_icon::entry_icon_data_url;
+pub use finder_favorites::{
+    FinderFavorites, FinderFavoritesAdapter, FinderFavoritesDiscovery, SystemFavorite,
+};
+pub use locations::{
+    DiscoveredLocations, LocationDiscovery, LocationKind, LocationSource, LocationWarning,
+    SystemLocation, SystemLocationAdapter,
+};
+pub use volume_observer::{observe_volume_changes, VolumeObserver};
+
 /// macOS file-URL clipboard adapter. It deliberately carries no cut marker:
 /// destructive intent remains owned by PaneDeck's application state.
 #[derive(Clone, Copy, Debug, Default)]

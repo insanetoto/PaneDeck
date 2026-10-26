@@ -159,3 +159,32 @@ PD-020 本身不提供写入执行能力；具体执行器只接受已生成的�
 - `npm run test:e2e:v2` 提供当前版本集成回归入口；v1 规划、任务和验收文档保留为历史。2026-10-12 用户明确暂缓中断恢复/VoiceOver 和实机性能/资源，当前范围及缺陷复测状态以 v2 验收记录为准；暂缓项不计为通过。
 - 废纸篓通过 `NSFileManager.trashItemAtURL` 和当前文件 URL 执行，不经 Finder AppleScript。错误按 NSError 的域和代码分类，脚本退出码不再被当作 POSIX 权限错误；不将包含路径的系统错误描述输出到日志，也不提供永久删除回退。真实废纸篓回归为显式 opt-in，只移动测试持有文件，并按系统返回的精确 URL 恢复测试数据。
 - 目录右键的新建子目录通过 `create_child_directory` 提交捕获的条目引用和名称，由 Rust 解析父目录，再进入原有创建计划/队列/日志。该动作不要求导航；空白处、菜单栏与快捷键的新建保留当前目录目标。
+
+## v3 窗格与列表视觉
+
+- 两侧导航区使用同一产品图标，可见窗格文字删除，区域可访问名称与内部来源状态保留。
+- 工作区采用互补 `fr` 列宽和 1px 分隔列，去掉外侧留白及卡片样式；透明拖动命中区不增加布局间隔，保留标准焦点和键盘调整。
+- 文件名/元数据使用 13px/12px 令牌，虚拟列表以 `FILE_ROW_HEIGHT = 26` 统一计算高度、位移和焦点滚动；图标与缩进仍是代码内 SVG/CSS，无新增文件缩略图服务。
+- 窗格内导航错误作为独立布局行，避免覆盖第一条文件；错误颜色跟随主题。`npm run test:e2e:v3` 覆盖界面及文件流程，Chrome 几何证据与真实原生实机证据分开记录。用户已同意以自动测试通过推进，未测原生项目仍保留补验，详见 `v3-acceptance.md`。
+
+## v4 列宽、字号与持久化（PD-300～PD-303）
+
+- 列宽由 `columnWidths.ts` 统一建模：名称列为自动（`minmax(180px, 1fr)`）或固定值，大小/种类/修改日期为固定值；默认 92/92/150，范围 180～720 / 64～320 / 80～320 / 120～400，表格最小宽度为 `max(520, 四列之和)`。
+- `VirtualFileList` 通过四个 CSS 变量把同一宽度模型交给表头与虚拟行；表头右侧 8px `separator` 使用指针捕获调整，释放提交，`pointercancel`/失去捕获回退，双击恢复单列，`←`/`→` 每次 8px、`Shift` 为 24px。
+- 横向溢出由虚拟列表视口承担，表头按 `scrollLeft` 平移；表头通过 `ResizeObserver` 读取竖向滚动条占宽并补偿自身内边距，避免名称列在有无滚动条时与行错位。垂直虚拟化、行高、选中与树展开语义不变。空目录仍渲染表头，空状态作为覆盖层展示。Chrome 几何证据见 `artifacts/v4/browser-columns.json`。
+- 列宽只写入本地 `panedeck.column-widths.v1`，按窗格独立；版本不符、损坏或越界时安全回退，读写失败不阻止浏览。存储不进入 Rust、IPC 或诊断路径。
+- 文件名 14px、侧栏 13px、分组标题 11px、行高 28px；`FILE_ROW_HEIGHT` 与 `--file-row-height` 由测试保持同步。自动测试与 Chrome 几何通过；原生 WebView、浅色主题、访达对照与 200% 缩放仍待验收。
+- 侧栏“单击选择、双击/Enter/Command-Down 进入”由 PD-312 实施：单击只选择并激活窗格，不读取目录；打开仍走 `open_directory` 的原生路径解析与会话。常用目录作为默认收藏，位置列出 iCloud、CloudStorage 与卷。
+
+## v4 系统位置与访达收藏（PD-310～PD-322）
+
+- `panedeck-platform` 只读适配标准目录、iCloud 本地根、`~/Library/CloudStorage` 入口与 Foundation 挂载卷；只读取入口元数据，不枚举提供商内容、不下载、不挂载。卷 ID 优先 UUID，分类区分本地/外接/网络；未识别来源使用中性类别。
+- `LocalLocationService` 与 `FinderFavoritesService` 使用 30 秒缓存、3 秒有界等待与单飞刷新；平台调用在阻塞线程执行。超时返回上次快照并加警告，后台完成后更新缓存；单源失败不清空其他入口。
+- Tauri 暴露异步 `list_local_locations`、`list_finder_favorites`，返回带来源、可用性和局部警告的 DTO；未增加文件系统 capability。`NSWorkspace` 挂载/卸载观察者通过 `locations-changed` 事件触发刷新，只更新入口，不自动跳转；观察者生命周期为进程级。
+- 访达收藏通过 CoreServices `LSSharedFileList` 只读读取，解析 flags 禁止用户交互与挂载；只接纳可解析为现有目录的项。该 API 只对已打包 `.app` 暴露用户列表，未打包开发二进制返回空列表，不伪造结果。
+- 目录单击：仅侧栏 Desktop/Downloads/Documents 在单击时打开；个人文件夹、iCloud/卷、应用/访达收藏与文件列表仍单击选择、双击或 Enter 打开。
+- 卸载：应用数据只按固定标识允许列表删除；应用包校验 `.app`/`Info.plist` 后移到废纸篓；不删除用户文件、卷或 TCC 记录。见 [uninstall.md](uninstall.md)。
+- Finder 文件图标：`read_entry_icon` 只接收不透明条目引用，在平台层用 `NSWorkspace.iconForFile` 生成 PNG data URL；前端按扩展名/目录条目缓存，路径不进入 IPC。
+- 收藏合并以访达名称/顺序优先，应用独有项追加，按路径去重；同名不同路径保留。系统项没有删除按钮，应用项仍可增删；失败/超时保留最后有效快照与应用记录。路径仅用于本地导航，不进入诊断或操作日志。
+- 本机对照发现 LS 共享列表包含 Finder 可见侧栏未显示的项目（可能被 Finder 设置隐藏），`kLSSharedFileListItemHidden` 无可用值。用户要求与可见侧栏一致，但选择不授予完全磁盘访问；最终范围为隐藏全部共享收藏并给出权限警告，保留标准位置与应用收藏。只读 `.sfl4` `visibility` 过滤仅保留为有权限时的可选实现，不实现基于名称猜测的过滤。
+- 探针与未测边界见 `v4-system-locations-probe.md`、`v4-finder-favorites-probe.md`；真实外接/NAS/云盘、macOS 14～16、TCC 与原生视觉仍待验收。

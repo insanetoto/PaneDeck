@@ -10,10 +10,11 @@ import type { OperationClient, OperationJob, OperationSnapshot } from "./browser
 import type { DiagnosticClient } from "./browser/diagnosticApi";
 import type { RecoveryClient } from "./browser/recoveryApi";
 import { I18nProvider, LANGUAGE_STORAGE_KEY } from "./i18n/I18nProvider";
+import { DEFAULT_COLUMN_WIDTHS, saveColumnWidths } from "./browser/columnWidths";
 
 function renderApp() {
   const locationsClient: LocalLocationsClient = {
-    list: vi.fn().mockResolvedValue({ locations: [], volumeScanFailed: false }),
+    list: vi.fn().mockResolvedValue({ locations: [], warnings: [] }),
   };
   return render(
     <I18nProvider>
@@ -43,6 +44,13 @@ describe("dual-pane shell", () => {
     expect(left).not.toHaveAttribute("data-active");
     expect(screen.queryByText("Active")).not.toBeInTheDocument();
     expect(document.querySelector(".app-toolbar")).toBeNull();
+    expect(within(left).queryByText("Left pane")).not.toBeInTheDocument();
+    expect(within(right).queryByText("Right pane")).not.toBeInTheDocument();
+    const icons = document.querySelectorAll<HTMLImageElement>(".pane-product-icon");
+    expect(icons).toHaveLength(2);
+    expect(icons[0].src).toBe(icons[1].src);
+    expect(icons[0]).toHaveAttribute("alt", "");
+    expect(icons[0]).not.toHaveAttribute("tabindex");
     expect(within(right).queryByText("Active")).not.toBeInTheDocument();
 
     fireEvent.click(rightHidden);
@@ -122,7 +130,7 @@ describe("dual-pane shell", () => {
       <I18nProvider>
         <App
           operationClient={client}
-          locationsClient={{ list: async () => ({ locations: [], volumeScanFailed: false }) }}
+          locationsClient={{ list: async () => ({ locations: [], warnings: [] }) }}
         />
       </I18nProvider>,
     );
@@ -160,7 +168,7 @@ describe("dual-pane shell", () => {
 
   it("resizes panes by dragging the separator and resets on double click", () => {
     renderApp();
-    const separator = screen.getByRole("separator");
+    const separator = screen.getByRole("separator", { name: "Resize panes" });
     const workspace = separator.parentElement;
     if (!workspace) throw new Error("workspace is missing");
     Object.defineProperty(workspace, "getBoundingClientRect", {
@@ -172,11 +180,59 @@ describe("dual-pane shell", () => {
     fireEvent.pointerUp(separator, { pointerId: 1 });
 
     expect(separator).toHaveAttribute("aria-valuenow", "65");
+    expect(workspace.style.getPropertyValue("--left-pane-width")).toBe("65fr");
+    expect(workspace.style.getPropertyValue("--right-pane-width")).toBe("35fr");
     fireEvent.doubleClick(separator);
     expect(separator).toHaveAttribute("aria-valuenow", "50");
     separator.focus();
     fireEvent.keyDown(separator, { key: "ArrowRight" });
     expect(separator).toHaveAttribute("aria-valuenow", "52");
+  });
+
+  it("shows a standard directory once when Finder also has it as a favorite", async () => {
+    const locationsClient: LocalLocationsClient = {
+      list: vi.fn().mockResolvedValue({
+        locations: [
+          {
+            id: "desktop",
+            kind: "desktop",
+            source: "standard",
+            name: "Desktop",
+            path: "/Users/test/Desktop",
+            available: true,
+            isLocal: true,
+            isRemovable: false,
+          },
+        ],
+        warnings: [],
+      }),
+    };
+    const finderFavoritesClient = {
+      list: vi.fn().mockResolvedValue({
+        favorites: [
+          {
+            id: "finder:desktop",
+            name: "Desktop",
+            path: "/Users/test/Desktop",
+            available: true,
+          },
+        ],
+        unresolved: 0,
+        failed: false,
+        timedOut: false,
+      }),
+    };
+    render(
+      <I18nProvider>
+        <App finderFavoritesClient={finderFavoritesClient} locationsClient={locationsClient} />
+      </I18nProvider>,
+    );
+    const left = screen.getByRole("region", { name: "Left pane" });
+    const sidebar = within(left).getByRole("complementary", { name: "Locations" });
+    await waitFor(() =>
+      expect(within(sidebar).getAllByRole("button", { name: "Desktop" })).toHaveLength(1),
+    );
+    expect(within(sidebar).queryByRole("button", { name: "Remove favorite: Desktop" })).toBeNull();
   });
 
   it("warns when the previous app session ended with unfinished tasks", () => {
@@ -209,7 +265,7 @@ describe("dual-pane shell", () => {
         <App
           recoveryClient={recoveryClient}
           operationClient={operationClient}
-          locationsClient={{ list: async () => ({ locations: [], volumeScanFailed: false }) }}
+          locationsClient={{ list: async () => ({ locations: [], warnings: [] }) }}
         />
       </I18nProvider>,
     );
@@ -239,7 +295,7 @@ describe("dual-pane shell", () => {
       confirmCleanup: vi.fn().mockResolvedValue(undefined),
     };
     const locationsClient: LocalLocationsClient = {
-      list: vi.fn().mockResolvedValue({ locations: [], volumeScanFailed: false }),
+      list: vi.fn().mockResolvedValue({ locations: [], warnings: [] }),
     };
     render(
       <I18nProvider>
@@ -304,7 +360,7 @@ describe("dual-pane shell", () => {
       cancel: vi.fn(async () => undefined),
     };
     const locationsClient: LocalLocationsClient = {
-      list: vi.fn().mockResolvedValue({ locations: [], volumeScanFailed: false }),
+      list: vi.fn().mockResolvedValue({ locations: [], warnings: [] }),
     };
     render(
       <I18nProvider>
@@ -389,7 +445,7 @@ describe("dual-pane shell", () => {
       resolveConflict: vi.fn(async () => result("copy")),
     };
     const locationsClient: LocalLocationsClient = {
-      list: vi.fn().mockResolvedValue({ locations: [], volumeScanFailed: false }),
+      list: vi.fn().mockResolvedValue({ locations: [], warnings: [] }),
     };
     render(
       <I18nProvider>
@@ -531,7 +587,7 @@ describe("dual-pane shell", () => {
         <App
           directoryClient={directoryClient}
           locationsClient={{
-            list: vi.fn().mockResolvedValue({ locations: [], volumeScanFailed: false }),
+            list: vi.fn().mockResolvedValue({ locations: [], warnings: [] }),
           }}
           operationClient={operationClient}
         />
@@ -689,6 +745,107 @@ describe("pane navigation", () => {
     expect(screen.getByRole("button", { name: "Back" })).toBeDisabled();
   });
 
+  it("warns when Finder visibility cannot be read without Full Disk Access", () => {
+    const client: DirectoryClient = {
+      openPath: vi.fn(),
+      openChild: vi.fn(),
+      openParent: vi.fn(),
+      reopen: vi.fn(),
+    };
+    render(
+      <I18nProvider>
+        <FilePane
+          active
+          client={client}
+          finderVisibilityAvailable={false}
+          id="left"
+          onActivate={vi.fn()}
+          paneRef={createRef<HTMLElement>()}
+        />
+      </I18nProvider>,
+    );
+    expect(
+      screen.getByText(/Finder visibility is unavailable \(Full Disk Access required\)/),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps per-pane column widths when locations refresh", async () => {
+    saveColumnWidths("left", { ...DEFAULT_COLUMN_WIDTHS, size: 150 });
+    const client: DirectoryClient = {
+      openPath: vi.fn().mockResolvedValue(listing("/one", "one.txt", "1")),
+      openChild: vi.fn(),
+      openParent: vi.fn(),
+      reopen: vi.fn(),
+    };
+    const locations = [
+      {
+        id: "home",
+        kind: "home" as const,
+        source: "standard" as const,
+        name: "Home",
+        path: "/Users/test",
+        available: true,
+        isLocal: true,
+        isRemovable: false,
+      },
+    ];
+    const pane = (items: typeof locations) => (
+      <I18nProvider>
+        <FilePane
+          active
+          client={client}
+          id="left"
+          locations={items}
+          onActivate={vi.fn()}
+          paneRef={createRef<HTMLElement>()}
+        />
+      </I18nProvider>
+    );
+    const view = render(pane([]));
+    const input = screen.getByRole("textbox", { name: "Folder path" });
+    fireEvent.change(input, { target: { value: "/one" } });
+    fireEvent.submit(input.closest("form")!);
+    expect(await screen.findByText("one.txt")).toBeInTheDocument();
+    const table = view.container.querySelector<HTMLElement>(".file-table")!;
+    expect(table.style.getPropertyValue("--col-size")).toBe("150px");
+
+    view.rerender(pane(locations));
+    expect(table.style.getPropertyValue("--col-size")).toBe("150px");
+    expect(screen.getByText("one.txt")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Home" })).toBeInTheDocument();
+  });
+
+  it("keeps the column header adjustable in an empty folder", async () => {
+    const client: DirectoryClient = {
+      openPath: vi.fn().mockResolvedValue({
+        directory: { sessionId: "empty" },
+        displayPath: "/empty",
+        canGoUp: true,
+        warnings: [],
+        entries: [],
+      }),
+      openChild: vi.fn(),
+      openParent: vi.fn(),
+      reopen: vi.fn(),
+    };
+    const view = renderPane(client);
+    const input = screen.getByRole("textbox", { name: "Folder path" });
+    fireEvent.change(input, { target: { value: "/empty" } });
+    fireEvent.submit(input.closest("form")!);
+
+    expect(await screen.findByText("This folder is empty")).toBeInTheDocument();
+    const size = screen.getByRole("separator", { name: "Resize Size column" });
+    fireEvent.pointerDown(size, { button: 0, clientX: 100, pointerId: 2 });
+    fireEvent.pointerMove(size, { clientX: 140, pointerId: 2 });
+    fireEvent.pointerUp(size, { pointerId: 2 });
+    expect(
+      view.container
+        .querySelector<HTMLElement>(".file-table")!
+        .style.getPropertyValue("--col-size"),
+    ).toBe("132px");
+    expect(screen.getByText("This folder is empty")).toBeInTheDocument();
+  });
+
   it("supports back, forward, parent button and keyboard parent navigation", async () => {
     const client: DirectoryClient = {
       openPath: vi
@@ -768,41 +925,140 @@ describe("pane navigation", () => {
     expect(stop).toHaveBeenCalled();
   });
 
-  it("opens local locations, disables unavailable ones, and adds a local favorite", async () => {
+  it("selects locations without reading, opens on double click or Enter, and keeps favorites local", async () => {
     const client: DirectoryClient = {
-      openPath: vi.fn().mockResolvedValue(listing("/Users/test", "home.txt", "1")),
+      openPath: vi.fn((path: string) =>
+        Promise.resolve(listing(path, path.endsWith("iCloud") ? "icloud.txt" : "home.txt", "1")),
+      ),
       openChild: vi.fn(),
       openParent: vi.fn(),
       reopen: vi.fn(),
     };
     const addFavorite = vi.fn();
+    const refreshLocations = vi.fn();
+    const refreshFavorites = vi.fn();
+    const onActivate = vi.fn();
     render(
       <I18nProvider>
         <FilePane
           active
           client={client}
+          favorites={[
+            { name: "system", path: "/Users/system", source: "finder", available: true },
+            { name: "other", path: "/Users/other", source: "app", available: true },
+          ]}
           id="left"
           locations={[
-            { id: "home", kind: "home", name: "Home", path: "/Users/test", available: true },
+            {
+              id: "home",
+              kind: "home",
+              source: "standard",
+              name: "Home",
+              path: "/Users/test",
+              available: true,
+              isLocal: true,
+              isRemovable: false,
+            },
+            {
+              id: "desktop",
+              kind: "desktop",
+              source: "standard",
+              name: "Desktop",
+              path: "/Users/test/Desktop",
+              available: true,
+              isLocal: true,
+              isRemovable: false,
+            },
             {
               id: "downloads",
               kind: "downloads",
+              source: "standard",
               name: "Downloads",
               path: "/Users/test/Downloads",
               available: false,
+              isLocal: true,
+              isRemovable: false,
+            },
+            {
+              id: "icloud-drive",
+              kind: "iCloudDrive",
+              source: "iCloud",
+              name: "iCloud Drive",
+              path: "/Users/test/iCloud",
+              available: true,
+              isLocal: true,
+              isRemovable: false,
             },
           ]}
-          onActivate={vi.fn()}
+          onActivate={onActivate}
           onAddFavorite={addFavorite}
+          finderUnresolved={1}
+          onRefreshFavorites={refreshFavorites}
+          onRefreshLocations={refreshLocations}
           paneRef={createRef<HTMLElement>()}
         />
       </I18nProvider>,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Home" }));
+    const home = screen.getByRole("button", { name: "Home" });
+    fireEvent.click(home);
+    expect(home).toHaveAttribute("aria-pressed", "true");
+    expect(onActivate).toHaveBeenCalledWith("left");
+    expect(client.openPath).not.toHaveBeenCalled();
+    fireEvent.doubleClick(home);
     expect(await screen.findByText("home.txt")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Downloads" })).toBeDisabled();
+    expect(client.openPath).toHaveBeenCalledWith(
+      "/Users/test",
+      expect.objectContaining({ pane: "left" }),
+    );
+
+    const desktop = screen.getByRole("button", { name: "Desktop" });
+    fireEvent.click(desktop);
+    expect(client.openPath).toHaveBeenLastCalledWith(
+      "/Users/test/Desktop",
+      expect.objectContaining({ pane: "left" }),
+    );
+
+    const downloads = screen.getByRole("button", { name: "Downloads" });
+    expect(downloads).not.toBeDisabled();
+    expect(downloads).toHaveAttribute("data-unavailable", "true");
+    fireEvent.click(downloads);
+    expect(downloads).toHaveAttribute("aria-pressed", "true");
+
+    const icloud = screen.getByRole("button", { name: "iCloud Drive" });
+    fireEvent.click(icloud);
+    expect(client.openPath).not.toHaveBeenCalledWith("/Users/test/iCloud", expect.anything());
+    fireEvent.keyDown(icloud, { key: "Enter" });
+    expect(client.openPath).toHaveBeenLastCalledWith(
+      "/Users/test/iCloud",
+      expect.objectContaining({ pane: "left" }),
+    );
+    expect(await screen.findByText("icloud.txt")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Add current folder to favorites" }));
-    expect(addFavorite).toHaveBeenCalledWith({ name: "test", path: "/Users/test" });
+    expect(addFavorite).toHaveBeenCalledWith({ name: "iCloud", path: "/Users/test/iCloud" });
+
+    const sidebar = screen.getByRole("complementary", { name: "Locations" });
+    const favorite = within(sidebar).getByRole("button", { name: "other" });
+    fireEvent.click(favorite);
+    expect(favorite).toHaveAttribute("aria-pressed", "true");
+    fireEvent.doubleClick(favorite);
+    expect(client.openPath).toHaveBeenLastCalledWith(
+      "/Users/other",
+      expect.objectContaining({ pane: "left" }),
+    );
+
+    const system = within(sidebar).getByRole("button", { name: "system" });
+    expect(within(sidebar).queryByRole("button", { name: "Remove favorite: system" })).toBeNull();
+    fireEvent.doubleClick(system);
+    expect(client.openPath).toHaveBeenLastCalledWith(
+      "/Users/system",
+      expect.objectContaining({ pane: "left" }),
+    );
+    expect(within(sidebar).getByText("Unresolved Finder favorites: 1")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh locations" }));
+    expect(refreshLocations).toHaveBeenCalledOnce();
+    fireEvent.click(within(sidebar).getByRole("button", { name: "Refresh favorites" }));
+    expect(refreshFavorites).toHaveBeenCalledOnce();
   });
 });
